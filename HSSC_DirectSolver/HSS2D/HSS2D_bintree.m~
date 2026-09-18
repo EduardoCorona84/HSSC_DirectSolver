@@ -1,0 +1,632 @@
+function [INFO_TREE]=HSS2D_bintree(params)
+%{
+This program returns the necessary arrays for an adaptively refined, 
+level-restricted binary tree (essentially a quadtree) of a planar surface 
+of maximum depth depth. It alternates between horizontal and vertical 
+bisection of resulting boxes. 
+
+Adaptive bisection rule: (otherwise, it's uniform) 
+A box is refined if the number of source particles >= max_particles and
+its level is <= depth. 
+
+Parent and children lists, as well other index sets 
+which are needed for the HSS solver are stored. 
+
+Inputs: 
+params.depth         (int) maximum depth of the quadtree
+params.bisec_rule = 'uniform' - uniform quadtree up to level depth
+                  = 'maxpart' - bisects a node if the number of particles
+                                is greater than a prescribed maximum. 
+params.X_source      (float nsx2) source points 
+params.max_particles (int) maximum number of particles allowed in a leaf
+params.DOskeletons   (bool) add skeleton / index info
+params.Kernel        (string) Matrix K[Ii,Ij] eval function name  
+params.Layers        (int) number of layers needed for skeletons
+params.acc           (double) accuracy of ID's for leaf boxes
+params.p             (int) points per side of proxy rectangle
+params.INTERform     (string) determines storage of interpolation operators ('dense' or 'lowrank') 
+              
+Outputs
+INFO_TREE (struct) containing: 
+
+Binary Tree: 
+    numlev (int depth x 1 array) boxes per level
+    leaves (int numleaf x 2 array) leaves box numbers and level
+
+    BOX (per box info) 
+        cent  (float total_box x 2 array) box center 
+        levbox (int total_box x 1 array)   box level 
+        parent (int total_box x 1 array) box parents (0 for root node)
+        child (int total_par x 2 array) box's children (non leaf boxes)
+
+        Index and ID / Skeleton information:
+            I_srcup / I_srcdn (int, nskel x 1 array ) index numbers for 
+            points on box before skeletonization
+            I_skup / I_skdn   (int, k_skel x 1 array) index numbers for 
+            points on box after skeletonization (so, minus interface)
+            n_skel (int) size of I_srcup / I_srcdn
+            k_skel (int) size of skeleton
+            J_up / J_dn  (int, nskel x 1 array ) = [I_sk , I_rs] index with upwards
+            skeleton first, residual points second. 
+            T_up / T_dn  Interpolation matrix (stored either densely or as a low
+            rank (T.U,T.V) pair)
+
+Programmer: Eduardo Corona, CIMS, NYU 
+Advisor: Denis Zorin
+Collaboration with Per Gunnar Martinsson
+%}
+
+depth = params.depth; 
+X_source = params.X_source;
+N = size(X_source,1);
+
+%--------------------------------------------------------------------------
+% ROOT NODE
+
+% No parents for root
+    P(1) = 0;
+% 2 potential children, none so far
+    nchild=2;
+    C(1,1:nchild) = zeros(1,nchild);
+% Center of root at [0,0] (of the square [-1,1]^2)
+    cent(1,:) = [0 0];
+    cent_int(1,:) = [1 1]; 
+    
+ % Number of boxes per level
+    numlev = zeros(1,depth+1);
+    numlev(1)=1;
+% Total Number of nodes on the tree
+    numnodes = 1;
+% Box levels 
+    levbox(1) = 0;
+% Array that stores box numbers according to level in order to traverse the
+% tree
+    box_numbers = zeros(depth+1,2^depth);
+    box_numbers(1,1) = 1;
+
+% Source Points
+
+
+%--------------------------------------------------------------------------
+%--------------------------------------------------------------------------
+% (I) BINARY TREE CONSTRUCTION
+
+% We traverse the tree while the level of the boxes considered is not
+% greater than the maximum assigned depth, and as long as bisection is
+% required. 
+% When required, a recursive bisection function is used to ensure that the tree
+% is bisected adaptively and/or is level restricted. 
+% On the first pass, the necessary arrays are created for each box going 
+% down the binary tree. 
+
+lev=0;
+num_leaf=0;
+num_bisec = zeros(1,depth+1);
+Sindex = cell(1,depth+1);
+
+for i=1:depth+1
+    if mod(i-1,2) == 0
+        Sindex{i} = sparse(2^((i-1)/2),2^((i-1)/2));
+    else 
+        Sindex{i} = sparse(2^(i/2),2^(i/2-1));
+    end
+end
+
+% Downwards pass bisection / tree build
+while lev<=depth
+    
+    if mod(lev,2) == 0
+        scl = lev/2;
+    else
+        scl = (lev-1)/2;
+    end
+    
+    %----------------------------------------------------------------------
+    %Integer Coordinates for Maximum Particle (Adaptive) build
+    if strcmp(params.bisec_rule,'maxpart')
+        % The array coord gives us integer coordinates (i,j) (i,j in
+        % {1,..,2^lev}) for each point in X_source, and we record the number of
+        % particles in each box in Num. 
+        if mod(lev,2) == 0
+            % level is even, boxes are square, scl = lev/2;
+            coord = ceil((2^(scl-1))*(X_source+ones(N,2)));
+            %correcting for points with coordinates == -1. 
+            coord = coord + (coord==0); 
+            % fractional part of rounding up
+            frac = coord - (2^(scl-1))*(X_source+ones(N,2));
+            n1 = 2^scl; n2 = n1; 
+            
+            Num = zeros(n1,n2);
+        else
+            % level is odd, boxes are rectangles, scl = (lev-1)/2;
+            coord(:,1) = ceil((2^(scl))*(X_source(:,1)+ones(N,1)));
+            coord(:,2) = ceil((2^(scl-1))*(X_source(:,2)+ones(N,1)));
+            %correcting for points with coordinates == -1. 
+            coord = coord + (coord==0); 
+            % fractional part of rounding up
+            frac(:,1) = coord(:,1) - (2^(scl))*(X_source(:,1)+ones(N,1));
+            frac(:,2) = coord(:,2) - (2^(scl-1))*(X_source(:,2)+ones(N,1));
+            n1 = 2^(scl+1); n2 = 2^scl;  
+            
+            Num = zeros(n1,n2);
+        end
+    
+               
+        % Adding points on each box
+        for i = 1:N
+            Num(coord(i,1),coord(i,2)) = Num(coord(i,1),coord(i,2))+1;
+            
+             % If they exist, add points overlapping on upper left bdry
+            if frac(i,1)==0 && coord(i,1)<n1
+                Num(coord(i,1)+1,coord(i,2)) = Num(coord(i,1)+1,coord(i,2))+1;
+            end
+            if frac(i,2)==0 && coord(i,2)<n2
+                Num(coord(i,1),coord(i,2)+1) = Num(coord(i,1),coord(i,2)+1)+1;
+            end
+            if (frac(i,1)==0 && coord(i,1)<n1) && (frac(i,2)==0 && coord(i,2)<n2)
+                Num(coord(i,1)+1,coord(i,2)+1) = Num(coord(i,1)+1,coord(i,2)+1)+1;
+            end
+        end
+    end
+        
+%----------------------------------------------------------------------
+% We consider each box on the current level, and we bisect using the function bisect_node 
+    
+    for k = 1:numlev(lev+1)
+        
+        % We first obtain the kth box's integer coordinates (i,j)
+        numbox = box_numbers(lev+1,k);
+        centB = cent(numbox,:);
+        cent_intB = cent_int(numbox,:);         
+        iB = cent_intB(1); jB = cent_intB(2); 
+        
+        % We use the sparse matrix Sindex{lev+1} to create an inverse that
+        % maps (iB,jB) -> box number
+        Sindex{lev+1}(iB,jB) = numbox;        
+        
+        % The function bisect_node does the following: before
+        % bisecting, it checks if any of its neighbors is one level up.
+        % If that is the case, bisect_node is applied to this node
+        % recursively, and finally all boxes are bisected, and the
+        % necessary arrays are updated. 
+        
+        %------------------------------------------------------------------
+        % MAXPART (MAXIMUM PARTICLES CRITERION)
+        if strcmp(params.bisec_rule,'maxpart')
+            % if Num(i,j) is greater, then we add 4 new child boxes and
+            % add information to our arrays as needed
+            if Num(iB,jB) > params.max_particles && lev<depth
+            
+            [Sindex,cent,cent_int,C,P,box_numbers,num_bisec,numnodes,numlev,levbox]=bisect_node(centB,numbox,levbox,lev,Sindex,cent,cent_int,C,P,box_numbers,num_bisec,numnodes,numlev);
+            else
+            % If bisection is not necessary, B is a leaf, and as such, has
+            % no children. 
+            C(numbox,1:nchild) = zeros(1,nchild);
+            end
+        else
+            %--------------------------------------------------------------
+            % UNIFORM (UNIFORM QUADTREE)
+            if strcmp(params.bisec_rule,'uniform')
+                if lev<depth
+                    [Sindex,cent,cent_int,C,P,box_numbers,num_bisec,numnodes,numlev,levbox]=bisect_node(centB,numbox,levbox,lev,Sindex,cent,cent_int,C,P,box_numbers,num_bisec,numnodes,numlev);
+                else
+                % If bisection is not necessary, B is a leaf, and as such, has
+                % no children. 
+                C(numbox,1:nchild) = zeros(1,nchild);
+                end    
+            
+            end
+        end  
+       
+    end
+    
+    % The number of boxes at all levels higher than lev might have changed
+    % and so it is recomputed by multiplying the number of bisections by
+    % nchild
+    numlev(2:lev+2) = nchild*num_bisec(1:lev+1);
+    
+    % If no boxes were bisected, the loop must terminate. Otherwise, we go
+    % down one level. 
+    if num_bisec(lev+1)==0
+        maxlev=lev;
+        lev = depth + 1;
+    else
+        lev = lev + 1;
+    end 
+end
+
+leaves = zeros(2^scl,2); 
+
+for lev=0:maxlev
+    if lev > 0
+        for k=1:numlev(lev+1)
+            
+            % We now use the array box_numbers to compute each box's center
+            % and integer coordinates (iB,jB)
+            numbox = box_numbers(lev+1,k);
+            
+            % Add boxes to the leaves array
+            if C(numbox,1) == 0
+                num_leaf = num_leaf+1;
+                leaves(num_leaf,:) = [numbox , lev];
+            end            
+        end
+    end
+end
+
+%--------------------------------------------------------------------------
+%--------------------------------------------------------------------------
+% SKELETON INFORMATION (if DOskeletons is 1)
+if (params.DOskeletons)
+    
+    layers = params.layers; %Max number of bdry layers for box skeletons, usually between 2 and 4. 
+    length = ceil(sqrt(N)); 
+    max_size = 4*layers*(length - layers); 
+    
+    I_skup = zeros(N,max_size); 
+    I_skdn = I_skup; 
+    count = zeros(size(cent,1),1); 
+    
+    lev = min(leaves(:,2)); 
+    I_source = zeros(size(cent,1),params.max_particles);
+    
+    for isrc = 1:N
+        [I_source,count] = Build_I_source(X_source(isrc,:),isrc,I_source,lev,Sindex,C,count);    
+    end
+    
+    
+    %Upward pass in which we build I_box and arrays associated with
+    %skeleton information
+    for lev=maxlev:-1:0
+       for i = 1:numlev(lev+1)
+          Nbox = box_numbers(lev+1,i);
+          cB = cent(Nbox,:); 
+          
+          if mod(lev,2) == 0
+             scl = lev/2;
+             colrad = 2^(-scl); 
+             rowrad = colrad; 
+          else
+             scl = (lev-1)/2;
+             rowrad = 2^(-scl); 
+             colrad = rowrad/2;
+          end
+          
+          % If the box is a leaf, we pick skeleton points from I_source.
+          % Note that it is assumed that max_particles <= (2*layers-1)^2 in 
+          % case of a grid (meaning leaf boxes only have that many layers).
+          
+          if C(Nbox,1) == 0
+              % If params.max_particles is small enough, the box contains no more than 
+              % the required layers
+              n_skel(Nbox) = count(Nbox); 
+              % X_ext consists of layers just outside of the box 
+              % Build I_ext: 
+              
+              if params.transinv == 0
+              h = params.h;  
+              [X_ext] = LOCAL_Build_Proxy_Ring(cB,colrad,rowrad,h,layers);
+              
+              % SKELETON INFO FROM LEAF NODES 
+              [T_up{Nbox},J_up{Nbox},k_up(Nbox),T_dn{Nbox},J_dn{Nbox},k_dn(Nbox)] = ...
+                  LOCAL_Leaf_Skeleton_Info(X_ext,X_source,I_source(Nbox,I_source(Nbox,:)>0),params);
+              
+              I_skup(Nbox,1:k_up(Nbox)) = I_source(Nbox,J_up{Nbox}(1:k_up(Nbox))); 
+              I_skdn(Nbox,1:k_dn(Nbox)) = I_source(Nbox,J_dn{Nbox}(1:k_dn(Nbox)));
+              else
+                  if i==1
+                     h = params.h;  
+                     [X_ext] = LOCAL_Build_Proxy_Ring(cB,colrad,rowrad,h,layers);
+              
+                     % SKELETON INFO FROM LEAF NODES 
+                     [T_up{lev+1},J_up{lev+1},k_up(lev+1),T_dn{lev+1},J_dn{lev+1},k_dn(lev+1)] = ...
+                         LOCAL_Leaf_Skeleton_Info(X_ext,X_source,I_source(Nbox,I_source(Nbox,:)>0),params);
+                  end
+                  
+                  I_skup(Nbox,1:k_up(lev+1)) = I_source(Nbox,J_up{lev+1}(1:k_up(lev+1))); 
+                  I_skdn(Nbox,1:k_dn(lev+1)) = I_source(Nbox,J_dn{lev+1}(1:k_dn(lev+1)));  
+              end
+              
+          else 
+              %else, we CONCATENATE SKELETON POINTS from siblings
+              I_skupsrc{Nbox} = [I_skup(C(Nbox,1),I_skup(C(Nbox,1),:)>0) I_skup(C(Nbox,2),I_skup(C(Nbox,2),:)>0) ]; 
+              I_skdnsrc{Nbox} = [I_skdn(C(Nbox,1),I_skdn(C(Nbox,1),:)>0) I_skdn(C(Nbox,2),I_skdn(C(Nbox,2),:)>0) ];
+              
+              % SEPARATION OF BOUNDARY AND INTERFACE
+              n_skel(Nbox) = size(I_skupsrc{Nbox},2); 
+              %k_up(Nbox) = 0; k_dn(Nbox) = 0; 
+              
+              if params.transinv == 0
+              [J_up{Nbox},k_up(Nbox),J_dn{Nbox},k_dn(Nbox)] = LOCAL_Preset_Skeleton_Info(X_source,I_skupsrc{Nbox},I_skdnsrc{Nbox},cB,colrad,rowrad,h,layers,n_skel(Nbox));
+
+              I_skup(Nbox,1:k_up(Nbox)) = I_skupsrc{Nbox}(J_up{Nbox}(1:k_up(Nbox))); 
+              I_skdn(Nbox,1:k_dn(Nbox)) = I_skdnsrc{Nbox}(J_dn{Nbox}(1:k_dn(Nbox))); 
+              
+              [T_up{Nbox},T_dn{Nbox}] = LOCAL_Interpolation_Operators(cB,lev,maxlev,params,I_skupsrc{Nbox},J_up{Nbox},I_skdnsrc{Nbox},J_dn{Nbox},k_up(Nbox),k_dn(Nbox));
+              else
+                  if i==1
+                      [J_up{lev+1},k_up(lev+1),J_dn{lev+1},k_dn(lev+1)] = LOCAL_Preset_Skeleton_Info(X_source,I_skupsrc{Nbox},I_skdnsrc{Nbox},cB,colrad,rowrad,h,layers,n_skel(Nbox));              
+                      [T_up{lev+1},T_dn{lev+1}] = LOCAL_Interpolation_Operators(cB,lev,maxlev,params,I_skupsrc{Nbox},J_up{lev+1},I_skdnsrc{Nbox},J_dn{lev+1},k_up(lev+1),k_dn(lev+1));
+                  end
+                  
+                  I_skup(Nbox,1:k_up(lev+1)) = I_skupsrc{Nbox}(J_up{lev+1}(1:k_up(lev+1))); 
+                  I_skdn(Nbox,1:k_dn(lev+1)) = I_skdnsrc{Nbox}(J_dn{lev+1}(1:k_dn(lev+1))); 
+              end
+          end
+           
+       end
+    end
+    
+end
+
+%--------------------------------------------------------------------------
+%--------------------------------------------------------------------------
+    
+% SAVE TREE DATA into the struct INFO_TREE
+if strcmp(params.bisec_rule,'maxpart')
+    if params.DOskeletons
+        for NB = 1:size(cent,1)
+            if C(NB,1) == 0
+                INFO_TREE.BOX(NB) = struct('cent',cent(NB,:),'parent',P(NB),'child',C(NB,:),'levbox',levbox(NB),'I_srcup',I_source(NB,I_source(NB,:)>0),...
+                'I_srcdn',I_source(NB,I_source(NB,:)>0),'count',count(NB),'n_skel',n_skel(NB),'k_up',k_up(NB),'k_dn',k_dn(NB),'J_up',J_up{NB},'T_up',T_up{NB},'I_skup',...
+                I_skup(NB,I_skup(NB,:)>0),'I_skdn',I_skdn(NB,I_skdn(NB,:)>0),'J_dn',J_dn{NB},'T_dn',T_dn{NB});
+            else
+                INFO_TREE.BOX(NB) = struct('cent',cent(NB,:),'parent',P(NB),'child',C(NB,:),'levbox',levbox(NB),'I_srcup',I_skupsrc{NB},...
+                'I_srcdn',I_skdnsrc{NB},'count',count(NB),'n_skel',n_skel(NB),'k_up',k_up(NB),'k_dn',k_dn(NB),'J_up',J_up{NB},'T_up',T_up{NB},'I_skup',...
+                I_skup(NB,I_skup(NB,:)>0),'I_skdn',I_skdn(NB,I_skdn(NB,:)>0),'J_dn',J_dn{NB},'T_dn',T_dn{NB});
+            end
+        end
+    else
+        for NB = 1:size(cent,1)
+            INFO_TREE.BOX(NB) = struct('cent',cent(NB,:),'parent',P(NB),'child',C(NB,:),'levbox',levbox(NB));  
+        end
+    end
+    INFO_TREE.numlev = numlev; 
+    INFO_TREE.leaves = leaves; 
+    INFO_TREE.Sindex = Sindex;
+    INFO_TREE.box_numbers = box_numbers;
+    INFO_TREE.depth = maxlev; 
+else
+    if params.DOskeletons
+        if params.transinv 
+            for NB = 1:size(cent,1)
+                if C(NB,1) == 0
+                    INFO_TREE.BOX(NB) = struct('cent',cent(NB,:),'parent',P(NB),'child',C(NB,:),'levbox',levbox(NB),'I_srcup',I_source(NB,I_source(NB,:)>0),...
+                    'I_srcdn',I_source(NB,I_source(NB,:)>0),'n_skel',n_skel(NB),'I_skup',I_skup(NB,I_skup(NB,:)>0),'I_skdn',I_skdn(NB,I_skdn(NB,:)>0));
+                else
+                    INFO_TREE.BOX(NB) = struct('cent',cent(NB,:),'parent',P(NB),'child',C(NB,:),'levbox',levbox(NB),'I_srcup',I_skupsrc{NB},...
+                    'I_srcdn',I_skdnsrc{NB},'n_skel',n_skel(NB),'I_skup',I_skup(NB,I_skup(NB,:)>0),'I_skdn',I_skdn(NB,I_skdn(NB,:)>0));
+                end
+            end
+            
+            for lev = 0:maxlev
+                INFO_TREE.LEV(lev+1) = struct('k_up',k_up(lev+1),'k_dn',k_dn(lev+1),'J_up',J_up{lev+1},'T_up',T_up{lev+1},'J_dn',J_dn{lev+1},'T_dn',T_dn{lev+1}); 
+            end
+            
+        else
+            for NB = 1:size(cent,1)
+                if C(NB,1) == 0
+                    INFO_TREE.BOX(NB) = struct('cent',cent(NB,:),'parent',P(NB),'child',C(NB,:),'levbox',levbox(NB),'I_srcup',I_source(NB,I_source(NB,:)>0),...
+                    'I_srcdn',I_source(NB,I_source(NB,:)>0),'n_skel',n_skel(NB),'k_up',k_up(NB),'k_dn',k_dn(NB),'J_up',J_up{NB},'T_up',T_up{NB},'I_skup',...
+                    I_skup(NB,I_skup(NB,:)>0),'I_skdn',I_skdn(NB,I_skdn(NB,:)>0),'J_dn',J_dn{NB},'T_dn',T_dn{NB});
+                else
+                    INFO_TREE.BOX(NB) = struct('cent',cent(NB,:),'parent',P(NB),'child',C(NB,:),'levbox',levbox(NB),'I_srcup',I_skupsrc{NB},...
+                    'I_srcdn',I_skdnsrc{NB},'n_skel',n_skel(NB),'k_up',k_up(NB),'k_dn',k_dn(NB),'J_up',J_up{NB},'T_up',T_up{NB},'I_skup',...
+                    I_skup(NB,I_skup(NB,:)>0),'I_skdn',I_skdn(NB,I_skdn(NB,:)>0),'J_dn',J_dn{NB},'T_dn',T_dn{NB});
+                end
+            end
+        end
+    else
+        for NB = 1:size(cent,1)
+            INFO_TREE.BOX(NB) = struct('cent',cent(NB,:),'parent',P(NB),'child',C(NB,:),'levbox',levbox(NB));  
+        end
+    end
+    INFO_TREE.numlev = numlev; 
+    INFO_TREE.leaves = leaves; 
+    INFO_TREE.box_numbers = box_numbers;
+    INFO_TREE.depth = maxlev; 
+end
+end
+%--------------------------------------------------------------------------
+%--------------------------------------------------------------------------
+function [X_proxy] = LOCAL_Build_Proxy_Ring(cB,colrad,rowrad,h,layers)
+
+[X,Y1] = meshgrid(cB(1) - colrad - (layers-0.5)*h:h:cB(1) - colrad - 0.5*h , cB(2) - rowrad - (layers-0.5)*h:h:cB(2) + rowrad + (layers-0.5)*h); 
+[X2,Y2] = meshgrid(cB(1) - colrad + 0.5*h:h:cB(1) + colrad - 0.5*h, cB(2) - rowrad - (layers)*h:h:cB(2) - rowrad - h); 
+[X3,Y3] = meshgrid(cB(1) + colrad + h:h:cB(1) + colrad + (layers)*h , cB(2) + rowrad + (layers)*h:-h: cB(2) - rowrad - (layers)*h);
+[X4,Y4] = meshgrid(cB(1) + colrad:-h:cB(1) - colrad , cB(2) + rowrad + h:h:cB(2) + rowrad + (layers)*h); 
+%size_ext = 2*(length(X1(:)) + length(X2(:))); 
+
+X_proxy = [X1(:) Y1(:); X2(:) Y2(:); X3(:) Y3(:); X4(:) Y4(:)]; 
+
+end
+
+%--------------------------------------------------------------------------
+%--------------------------------------------------------------------------
+function [T_up,J_up,k_up,T_dn,J_dn,k_dn] = LOCAL_Leaf_Skeleton_Info(X_ext,X_source,I_source,params)
+% SUBSELECT POINTS FROM LEAF NODE MATRICES 
+A12 = A_submat_proxy(X_ext',X_source',I_source,[NaN,params.h],'proxy_2_box'); 
+A21 = A_submat_proxy(X_ext',X_source',I_source,[NaN,params.h],'box_2_proxy');
+
+acc = params.acc; 
+[T_uptmp, J_up ] = id_decomp(A21, acc);
+[T_dntmp, J_dn ] = id_decomp(A12',acc);
+k_skel = max(size(T_uptmp,1),size(T_dntmp,1));
+% We enforce that the outgoing rank = incoming rank.
+if ~(k_skel == size(T_uptmp,1))
+    [T_uptmp, J_up ] = id_decomp(A21, k_skel);
+elseif ~(k_skel == size(T_dntmp,1))
+    [T_dntmp, J_dn ] = id_decomp(A12',k_skel);
+end
+              
+T_up.U = T_uptmp; T_up.V = eye(size(T_uptmp,2));  
+T_dn.U = T_dntmp; T_dn.V = eye(size(T_dntmp,2)); 
+              
+k_up = k_skel; k_dn = k_skel; 
+
+end
+%--------------------------------------------------------------------------
+%--------------------------------------------------------------------------
+function [J_up,k_up,J_dn,k_dn] = LOCAL_Preset_Skeleton_Info(X_source,I_skupsrc,I_skdnsrc,cB,colrad,rowrad,h,layers,n_skel)
+
+X_skupsrc = X_source(I_skupsrc,:); 
+X_skdnsrc = X_source(I_skdnsrc,:);
+
+ % BOX DIMENSIONS
+ bdup1 = cB(1) + colrad - (layers)*h; 
+ bddn1 = cB(1) - colrad + (layers)*h; 
+ bdup2 = cB(2) + rowrad - (layers)*h; 
+ bddn2 = cB(2) - rowrad + (layers)*h;
+              
+ % SKELETON POINTS - BOUNDARY LAYERS
+ Idx = (1:n_skel)'; 
+ up_ind = (X_skupsrc(:,1) >= bdup1 | X_skupsrc(:,1) <= bddn1 | X_skupsrc(:,2) >= bdup2 | X_skupsrc(:,2) <= bddn2); 
+ J_up = Idx(up_ind); 
+ k_up = size(J_up,1); 
+              
+ Idx = (1:size(I_skdnsrc,2))'; 
+ dn_ind = (X_skdnsrc(:,1) >= bdup1 | X_skdnsrc(:,1) <= bddn1 | X_skdnsrc(:,2) >= bdup2 | X_skdnsrc(:,2) <= bddn2); 
+ J_dn = Idx(dn_ind); 
+ k_dn = size(J_dn,1);
+              
+ % THE REST OF THE POINTS ARE ON THE INTERFACE
+ res_ind = (1:n_skel);
+ res_ind(J_up(1:k_up)) = []; 
+ J_up(k_up+1:n_skel) = res_ind; 
+                  
+ res_ind = (1:size(I_skdnsrc,2));
+ res_ind(J_dn(1:k_dn)) = []; 
+ J_dn(k_dn+1:size(I_skdnsrc,2)) = res_ind;
+
+end
+%
+%
+function [T_up,T_dn] = LOCAL_Interpolation_Operators(cB,lev,maxlev,params,I_skupsrc,J_up,I_skdnsrc,J_dn,k_up,k_dn)
+h = params.h; 
+layers = params.layers; 
+X_source = params.X_source; 
+
+form = params.INTERform; 
+              
+% INTERPOLATION OPERATORS (VIA LEAST SQUARES) 
+% 'dense' - solves T = K[X_ext,X_sk]\K[X_ext,X_rs] densely 
+if strcmp(form,'dense') == 1 
+    [T_up,T_dn] = INTER_DENSE(cB,lev,h,layers,X_source,I_skupsrc,J_up,I_skdnsrc,J_dn,k_up,k_dn); 
+else
+    % 'lowrank_brute' - (1) [K12.U,K12.V] = ID_LOWRANK(K[X_ext,X_rs]); 
+    %                   (2) U = K[X_ext,X_sk]\K12.U; V =K12.V;  
+    if strcmp(form,'lowrank_brute')                
+        if lev < maxlev-1
+            % ID-based compression 
+            [T_up,T_dn] = INTER_TLR(cB,lev,h,layers,X_source,I_skupsrc,J_up,I_skdnsrc,J_dn,k_up,k_dn); 
+        else
+            % For leaf boxes and their immediate parents, interfaces are
+            % too small (or non-existent) 
+            [T_up,T_dn] = INTER_DENSE(cB,lev,h,layers,X_source,I_skupsrc,J_up,I_skdnsrc,J_dn,k_up,k_dn); 
+        end
+    else
+        % 'lowrank_hierarchy' - hierarchy on interface and 
+        % boundary to get rid of the log factors of the brute 
+        % force ID-based compression.  
+        if lev < maxlev-1 
+            p = params.p; 
+            [T_up,T_dn] = INTER_LOWRANK(cB,lev,h,layers,p,X_source,I_skupsrc,J_up,I_skdnsrc,J_dn,k_up,k_dn); 
+        else
+            % For leaf boxes and their immediate parents, interfaces are
+            % too small (or non-existent) 
+            [T_up,T_dn] = INTER_DENSE(cB,lev,h,layers,X_source,I_skupsrc,J_up,I_skdnsrc,J_dn,k_up,k_dn); 
+        end
+    end
+end
+
+end
+
+%--------------------------------------------------------------------------
+%--------------------------------------------------------------------------
+function [I_source,count] = Build_I_source(X,iX,I_source,lev,Sindex,C,count)
+    % This function goes down the tree until it finds the leaf to which X
+    % belong to. Then it adds its index to I_source. 
+    
+    if mod(lev,2) == 0
+        scl = lev/2;
+        % level is even, boxes are square, scl = lev/2;
+        coord = ceil((2^(scl-1))*(X + ones(1,2)));
+        %correcting for points with coordinates == -1. 
+        coord = coord + (coord==0); 
+    else
+         scl = (lev-1)/2;
+         % level is odd, boxes are rectangles, scl = (lev-1)/2;
+         coord(1) = ceil((2^(scl))*(X(1) + 1));
+         coord(2) = ceil((2^(scl-1))*(X(2) + 1));
+         %correcting for points with coordinates == -1. 
+         coord = coord + (coord==0); 
+    end
+    
+    S = Sindex{lev+1};
+    Nbox = S(coord(1),coord(2)); 
+    if C(Nbox,1) == 0
+        count(Nbox) = count(Nbox) + 1; 
+        I_source(Nbox,count(Nbox)) = iX;
+    else
+        [I_source,count] = Build_I_source(X,iX,I_source,lev+1,Sindex,C,count);  
+    end
+
+end
+
+%--------------------------------------------------------------------------
+%--------------------------------------------------------------------------jajajaja
+function [S,cent,cent_int,C,P,box_numbers,num_bisec,numnodes,numlev,levbox] = bisect_node(centB,numbox,levbox,lev,S,cent,cent_int,C,P,box_numbers,num_bisec,numnodes,numlev)
+    % This function performs the bisection of box B (with center centB, at
+    % level lev with coordinates (iB,jB)). 
+    
+    nchild = 2;
+    if mod(levbox(numbox),2) == 0
+        % Vertical Bisection
+        cta = [-0.5 0 ; 0.5 0];
+        scl = lev/2;
+    else
+        % Horizontal Bisection
+        cta = [0 0.5 ; 0 -0.5];
+        scl = (lev-1)/2;
+    end
+    
+    
+    % Update to data structures (perform the bisection). We assign the last
+    % 2 numbers to the new children boxes. 
+    % Centers
+    cent((1:2) + numnodes*ones(1,2),:) = ones(nchild,1)*centB+cta*(1/2)^(scl);
+    % Levels
+    levbox((1:2) + numnodes*ones(1,2)) = (lev+1)*ones(1,nchild);
+    % Now our box has nchild children
+    C(numbox,1:nchild) = (1:2) + numnodes*ones(1,2);
+    % These children are, as off now, leaves (no children of their own)
+    C((1:2) + numnodes*ones(1,2),:) = zeros(2,2); 
+    % Box Numbers
+    box_numbers(lev+2,(1:2)+numlev(lev+2)*ones(1,2)) = (1:2) + numnodes*ones(1,2);
+    % nchild more on this level
+    numlev(lev+2) = numlev(lev+2) + nchild;
+    % Parent info for children
+    P((1:2) + numnodes*ones(1,2)) = (numbox)*ones(1,nchild);
+    
+    % We add the children's integer coordinates to S(i,j)
+    for ch=1:nchild
+        if mod(levbox(numbox)+1,2) == 0
+            iC = ceil((2^(scl))*(cent(numnodes+ch,1)+1));
+            jC = ceil((2^(scl))*(cent(numnodes+ch,2)+1));
+        else
+            iC = (ceil((2^(scl+1))*(cent(numnodes+ch,1)+1))+1)/2;
+            jC = (ceil((2^(scl))*(cent(numnodes+ch,2)+1))+1)/2;
+        end
+        
+        cent_int(ch + numnodes,:) = [iC jC]; 
+        S{lev+2}(iC,jC) = numnodes+ch;
+    
+    end
+    
+    % Finally, the total number of nodes increases by nchild, and the
+    % number of bisections by one. 
+    numnodes = numnodes + nchild;
+    num_bisec(lev+1) = num_bisec(lev+1) + 1;
+
+end
+

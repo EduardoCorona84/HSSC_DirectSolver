@@ -1,0 +1,1458 @@
+===================================================================================================
+==                                                                                               ==
+==                                  HSS1D DOCUMENTATION                                          ==
+== A. Szymczak, E. Corona                                                                        ==
+===================================================================================================
+Copyright (C) 2011-2013 E. Corona, P.G. Martinsson, D. Zorin
+
+
+
+TABLE OF CONTENTS
+    NOTATION
+    INPUT
+        HSS_tree_parameters
+        Kernel_Eval
+    COMPRESS
+        HSS1D_compress_fsym
+        HSS1D_compress_fsym_offd_leaf
+        HSS1D_compress_green_nsym_Kproxy
+        HSS1D_compress_nsym
+        HSS1D_compress_nsym_offd_leaf
+        HSS1D_compress_submatrix_fsym_giventree
+        HSS1D_compress_submatrix_nsym_giventree
+        HSS1D_compressLR_fsym
+        HSS1D_compressLR_nsym
+        HSS1D_reducelev_fsym
+        HSS1D_reducelev_nsym
+    INVERT
+        HSS1D_invert_fsym
+        HSS1D_invert_nsym
+        HSS1D_invertp_fsym
+        HSS1D_invertp_nsym
+        HSS1D_merge_fsym
+        HSS1D_merge_nsym
+        HSS1D_transforminv_fsym
+        HSS1D_transforminv_nsym
+    APPLY
+        BHSS1D_apply_fsym
+        BHSS1D_apply_nsym
+        HSS1D_apply_fsym
+        HSS1D_apply_nsym
+        HSS1D_apply_rect_nsym
+        HSS1D_apply_submatrix_boxes
+        HSS1D_apply_submatrix_fsym
+        HSS1D_apply_submatrix_nsym
+        HSS1D_applyinv_fsym
+        HSS1D_applyinv_nsym
+    ARITHMETIC
+        HSS1D_transpose
+        HSS1D_scalarmult
+        HSS1D_sum_fsym
+        HSS1D_sum_nsym
+        HSS1D_OLS
+        HSS1D_recompress_fsym
+        HSS1D_recompress_nsym
+    HELPER
+        box_constants
+        Unifbintree
+        HSS1D_check_symmetry
+        HSS1D_fsym_to_nsym
+        HSS1D_nsym_to_fsym
+        HSS1D_postorder
+        HSS1D_preorder
+        HSS1D_sparse_matrix
+        HSS1D_split_fsym
+        HSS1D_split_nsym
+        HSS1D_symmetrize_fsym
+        HSS1D_updateLR_fsym
+
+
+
+===================================================================================================
+===================================================================================================
+NOTATION:
+
+    We use the following notation throughout the function descriptions (plain text version of the 
+    notation used in CMZ2012_paper.pdf and QUICK_START.pdf). Subscripts or superscripts will be 
+    suppressed when they are understood (eg. specifying a box or level in the tree). If a box is 
+    understood, an appended 1 or 2 to a variable will generally refer to its children.
+
+        X,I     : sample points and their indices, often used with subscripts _smpl, 
+                    _src, _sk, _rs, and _px for {sample}, {source}, {skeleton}, {residual}, and 
+                    {proxy} sets.
+        K       : kernel function
+        A       : kernel matrix K(X,X)
+        Ao = f  : system to be solved by HSS
+
+        ID      : interpolative decomposition
+        TF      : telescoping factorization
+        b,c     : function variations of the free-space Green's function
+        (N)TI   : (non)-translation invariant
+
+        tree    : the binary tree that makes up the HSS1D or HSS2D structure
+        d       : depth of the tree
+        box     : node in the tree
+        D,L,R   : matrices that make up the TF. Referred to by level or box.
+        T       : interpolation matrices that make up per-box L and R: L = P[I;T], R = [I T]P 
+                    where I is the identity and P is a permutation matrix that moves skeleton 
+                    indices to the front.
+        E,F     : auxiliary matrices used to represent the HSS inverse of A
+
+        n       : size of sample or source set of a box, depending on context
+        k       : size of skeleton set of a box
+
+
+
+===================================================================================================
+===================================================================================================
+INPUT
+
+
+    HSS_tree_parameters
+    {
+        FUNCTION CALL:
+            params = HSS_tree_parameters(pot,kh,sym,Ng,np,acc,lay,n_cut,TI) 
+
+        DESCRIPTION:
+            This function lets you input parameters for the kernel, binary tree, and compression. 
+            The default discretization is taken to be a regular grid of [-1,1]x[-1,1] consisting 
+            np x np panels, each with Ng x Ng tensor gaussian K_HSS. This can be changed by 
+            redefining params.X_source after the function terminates. The return value params is 
+            used as an argument in most HSS2D functions, however it must be updated during the 
+            BUILD TREE stage (after HSS2D_bintree_* is called).
+            
+        INPUT:
+            pot     <string>    (.flagpot) Name of the kernel for matrix entries K[p,q].
+                                    See Kernel_Eval for current options.
+            kh      <int>       (.kh) Wavenumber, if applicable. E.g. when evaluating low 
+                                    frequency oscillatory kernels such as the 2D Helmholtz free-
+                                    space Green's function.
+            sym     <bool>      (.sym) Whether or not the kernel is symmetric.
+            Ng      <int>       (.Ng) Number of points along one side of a panel (typically 5 - 9).
+            np      <int>       Number of panels along one side of the domain (for uniform tree).
+            acc     <float>     (.acc) Accuracy of IDs for leaf boxes.
+            lay     <int>       (.layers) Number of boundary layers used for skeleton sets. 
+                                    If kh<30, we suggest lay = 1 or 2 if acc is greater
+                                    or less than 1e-7. If kh>30 we suggest lay=3.
+            n_cut   <int>       (.n_cut) Minimum skeleton set size to switch to HSS form.
+            TI      <bool>      (.transinv) Whether or not kernel is translation invariant.
+
+
+        OUTPUT:
+            params  <struct>    Kernel, tree, and compression parameters for HSS2D algorithms.
+                                    Default values are shown below.
+            
+            Kernel Parameters
+                .flagpot = pot      
+                .kh = kh            
+                .sym = sym          
+                .transinv = TI      
+
+            Discretization Parameters
+                .Ng                 
+                .h = 2/(Ng * np)    Grid spacing of points.
+                .X_source           Source points in discretization. Calculated as guassian 
+                                        quadrature K_HSS in each panel in [-1,1]x[-1,1].
+                .order = 4;         Order of quadrature.
+                .dr_weights         Duan-Rohklin quadrature weights.
+
+
+            Tree Parameters
+                .max_particles = Ng*Ng      Maximum number of source points allowed in a leaf 
+                                                box.
+                .depth ~ 2log(np);          Maximum depth of quadtree so that a leaf box 
+                                                equals a panel.
+                .bisec_rule = 'uniform'     {'uniform', 'maxpart'} Binary tree stopping criterion. 
+                                            - 'uniform' creates a unifom quadtree of .depth levels 
+                                            - 'maxpart' is an adaptive build where a box is 
+                                                bisected only if it contains greater than 
+                                                max_particles source points and is at a level 
+                                                greater than .depth.
+
+            Compression Parameters
+                .acc = acc
+                .layers = lay
+                .n_cut = n_cut
+                .DOskeletons = true     After the tree is constructed with box centers, 
+                                            this determines whether to proceed in the 
+                                            compression of A by computing skeleton/index sets and 
+                                            interpolation operators.
+                .skel_rule = 'bdry'     {'ID', 'wdec', 'brdy'} Method to construct skeleton sets.
+                                        - 'ID' Skeleton found by interpolatory decomposition.
+                                        - 'wdec' Skeleton pre-determined by Whitney decomposition.
+                                        - 'brdy' Skeleton pre-determined to be .layers layers of 
+                                            points along the boundary of the box.
+                .skel_extra_pts = 0     Boolean value that specifies whether to add extra points 
+                                            to the preset skeleton sets. The extra points are 
+                                            computed by a randomized ID and they are used to keep 
+                                            interpolation accurate. This parameter should be set 
+                                            to true for oscillatory kernels or kernels that don't 
+                                            fulfill a Green's identity in the domain.
+                .INTERform = 'lowrank'  {'dense', 'lowrank'} Determines computation and storage of 
+                                            interpolation operators. 
+                .k_cut = 2500           Minimum skeleton set size to compute L,R matrices with 
+                                            HSS acceleration.
+                .proxy_rule = 'rand'    {'wdec', 'rand', 'brdy', neigh'} Method to construct 
+                                            proxies for equivalent density acceleration.
+                                        - 'wdec' Whitney decomposition.
+                                        - 'rand' Exterior boundary layers plus random points 
+                                            selected from an exponentially decaying distribution.
+                                        - 'brdy' Exterior boundary layers of the box.
+                                        - 'neigh' Proxy taken from skeleton points of neighbors.
+                .lambda = 1             For .proxy_rule='rand', the distribution of proxy points 
+                                            ~ 2^-(lambda*r) where r is the distance.
+                .dim = 2                Dimension of the kernel.
+                .proxy = 0              Proxy to skeleton interactions for NTI kernels. Specifies 
+                                            perturbation functions b and c.
+                .pp = []                Spline data for 3D examples.
+    }
+
+    Kernel_Eval
+    {
+        FUNCTION CALL:
+            A = Kernel_Eval(X1,X2,params)
+
+        DESCRIPTION:
+            This function takes 2D point arrays X1 and X2, and returns the matrix 
+            A = K[X1,X2]. The only part of params used is params.flagpot, which is a name for the 
+            kernel function being to be used. A few default kernels are available but you can also 
+            input your own kernel function (see RUNNING THE CODE section).
+
+        INPUT:
+            X1      <mx2 float>     Source points
+            X2      <mx2 float>     Target points (size need not be the same as X1)
+
+            params.flagpot -    'SL_H_2D' - 2D Helmholtz
+                                'SL_H_3D' - 3D Helmholtz
+                                'SL_L_2D' - 2D Laplace
+                                'SL_L_3D' - 3D Laplace
+                                'SL_Y_2D' - 2D Yukawa
+                                'SL_Y_3D' - 3D Yukawa
+                                'PSL_L_2D' - Smooth perturbation of 2D Laplace
+    }
+
+
+
+===================================================================================================
+===================================================================================================
+COMPRESS
+
+
+    HSS1D_compress_fsym
+    {
+        FUNCTION CALL:
+            K_HSS = HSS1D_compress_fsym(type,X,TREE,acc,knl_params,options)
+
+        DESCRIPTION:
+            This function compresses the symmetric kernel function matrix K[X,X] into HSS form 
+            (K_HSS) using the given parameters. The symmetry of K engenders equal row and column 
+            skeletons. Thus, K_HSS = D + L*Z*R, where D is symmetric and L = R'.  
+
+        INFILE VARIABLES:
+            radius_rel (double) specifies the radius of the proxy circles relative to the box size.
+                default = 1.75.
+            nproxy (int) specifies the number of samples to be used on the proxy circles. 
+                default = 50.
+        
+        INPUT:
+            type is a string in {'green', 'brute'} that specifies whether to use the Green's 
+                function speedup to localize skeleten set computation (representing interactions 
+                with far field points via a proxy) or a brute force construction.
+            X, given type='green' is an (N x 2) array with sorted points in a few layers along a 
+                curve (usually a box boundary or an interface between two boxes). 
+            X, given type='brute' is an (N x N) matrix K to be compressed using IDs on HSS 
+                block-rows and columns
+            TREE can be a {7 x nboxes} cell array that gives the underlying binary tree structure 
+                of K_HSS. It can also be an integer that specifies the maximum total number of 
+                points per leaf box, in which case a uniform tree is locally generated by 
+                subdividing X until leaves are of size < TREE. 
+            acc (double) is the desired accuracy.
+            knl_params is a struct of kernel evaluation parameters for type='green'. This can be 
+                generated in ../Common/HSS_tree_parameters.m
+            options is a string specifying any extra parameters. Currently, options 'offd' is the 
+                only supported argument, which opts to compress only top off-diagonal blocks
+            dim (int) is the dimension of the kernel (scalar -> dim = 1).
+        
+        OUTPUT:
+            K_HSS is the cell array containing the HSS tree and skeleton information 
+                (see ../Common/box_constants for details)
+    }
+
+    HSS1D_compress_fsym_offd_leaf
+    {
+        FUNCTION CALL:
+            KHSS = HSS1D_compress_fsym_offd_leaf(X,TREE,B1,acc,params,dim)
+
+        DESCRIPTION:
+            This function compresses the symmetric kernel function matrix K[X,X] into HSS form 
+            (K_HSS) respective of the given parameters. This function produces a matrix that keeps 
+            only off-diagonal blocks for each box at leaf level, determined by parameter B1.
+
+        INFILE VARIABLES:
+            radius_rel (double) specifies the relative radius of the proxy circles. default = 1.75.
+            nproxy (int) specifies the number of samples to be used on the proxy circles. 
+            default = 50.
+
+        INPUT:
+            X is an (N x 2) array with sorted points in a few layers along a curve (usually a box
+                boundary or an interface between two boxes).
+            TREE is a {50 x nboxes} cell array that gives the underlying binary tree structure of 
+                KHSS.
+            B1 is a (N x 1) boolean array where for each box i, letting B1:=B1(I_src(i)), the self
+                interaction matrices are
+                              D = [0  D(B1i,~B1i]
+                                  [D(~B1i,B1i) 0]
+                Interpolation operators R and L are also zeroed out accordingly.
+            acc (double) is the desired accuracy.
+            params is a struct of kernel evaluation parameters that can be generated using
+                ../Common/HSS_tree_parameters.m
+            dim (int) is the dimension of the kernel (scalar -> dim = 1)
+
+        OUTPUT:
+            KHSS is the cell array containing the HSS tree and skeleton information
+                (see ../Common/box_constants for details)
+    }
+
+    HSS1D_compress_green_nsym_Kproxy
+    {
+        FUNCTION CALL:
+            K_HSS = HSS1D_compress_green_nsym_Kproxy(Xin,Xout,TREE,acc,params,dim)
+
+        DESCRIPTION:
+            This function generates an HSS compressed form of the associated kernel matrix 
+            K[Xin,Xout]. K[Xin,Xout] is assumed to be a square matrix, where Xin is not 
+            necessarily equal to Xout. A uniform binary tree is used for both sets of points.
+        
+        INFILE VARIABLES:
+            radius_rel is an infile variable that can be tuned. It specifies the relative radius 
+                of the proxy circles. default = 1.75;
+            nproxy is an infile variable that can be tuned. It specifies the number of samples to  
+                be used on the proxy circles. default = 50;
+        
+        INPUT:
+            Xin is a (N x 2) matrix of the positions of the points along the curve "acting" on Xout
+            Xout is a (N x 2) matrix of the positions of the points along the curve being 
+                "acted upon."
+            TREE can be a {7 x nboxes} cell array that gives the underlying binary tree structure 
+                of K_HSS.
+            acc (double) is the desired accuracy.
+            params is a struct of kernel evaluation parameters that can be generated using 
+                ../Common/HSS_tree_parameters.m
+            dim (int) is the dimension of the kernel (scalar -> dim = 1)
+        
+        OUTPUT:
+            K_HSS is the cell array containing the HSS tree and skeleton information 
+                (see ../Common/box_constants for details)
+    }
+
+    HSS1D_compress_nsym
+    {
+        FUNCTION CALL:
+            K_HSS = HSS1D_compress_nsym(type,X,TREE,acc,knl_params,options)
+
+        DESCRIPTION:
+            This function compresses the non-symmetric kernel function matrix K[X,X] into HSS form 
+            (K_HSS) respective of the given parameters.
+
+        INFILE VARIABLES:
+            radius_rel (double) specifies the relative radius of the proxy circles. default = 1.75.
+            nproxy (int) specifies the number of samples to be used on the proxy circles. 
+                default = 50.
+        
+        INPUT:
+            type is a string in {'green', 'brute'} that specifies whether to use the Green's 
+                function speedup a brute force construction.
+            X, given type='green' is an (N x 2) array with sorted points in a few layers along a 
+                curve (usually a box boundary or an interface between two boxes). 
+            X, given type='brute' is an (N x N) matrix K to be compressed using IDs on HSS 
+                block-rows and columns.
+            TREE can be a {7 x nboxes} cell array that gives the underlying binary tree structure 
+                of K_HSS. It can also be an integer that specifies the maximum total number of 
+                points per leaf box, in which case a uniform tree is locally generated by 
+                subdividing X until leaves are of size < TREE. 
+            acc (double) is the desired accuracy.
+            knl_params is a struct of kernel evaluation parameters for type='green' that can be 
+                generated using ../Common/HSS_tree_parameters.m
+            options is a string specifying any extra parameters. Currently, options 'offd' is the 
+                only supported argument, which opts to compress only top off-diagonal blocks.
+            dim (int) is the dimension of kernel (scalar -> dim = 1).
+        
+        OUTPUT:
+            K_HSS is the cell array containing the HSS tree and skeleton information 
+                (see ../Common/box_constants for details)
+    }
+
+    HSS1D_compress_nsym_offd_leaf
+    {
+        FUNCTION CALL:
+            KHSS = HSS1D_compress_nsym_offd_leaf(X,TREE,B1,acc,params,dim)
+
+        DESCRIPTION:
+            This function compresses the non-symmetric kernel function matrix K[X,X] into HSS form 
+            (K_HSS) respective of the given parameters. This function produces a matrix that keeps 
+            only off-diagonal blocks for each box at leaf level, determined by parameter B1.
+        
+        INFILE VARIABLES:
+            radius_rel (double) specifies the relative radius of the proxy circles. default = 1.75.
+            nproxy (int) specifies the number of samples to be used on the proxy circles. 
+                default = 50.
+        
+        INPUT:
+            X is an (N x 2) array with sorted points in a few layers along a curve (usually a box 
+                boundary or an interface between two boxes).
+            TREE is a {50 x nboxes} cell array that gives the underlying binary tree structure of 
+                KHSS.
+            B1 is a (N x 1) boolean array where for each box i, letting B1:=B1(I_src(i)), the self 
+                interaction matrices are
+                              D = [0  D(B1i,~B1i] 
+                                  [D(~B1i,B1i) 0]
+                Interpolation operators R and L are also zeroed out accordingly. 
+            acc (double) is the desired accuracy.
+            params is a struct of kernel evaluation parameters that can be generated using 
+                ../Common/HSS_tree_parameters.m.
+            dim (int) is the dimension of the kernel (scalar -> dim = 1).
+        
+        OUTPUT:
+            KHSS is the cell array containing the HSS tree and skeleton information 
+                (see ../Common/box_constants for details)
+    }
+
+    HSS1D_compress_submatrix_fsym_giventree
+    {
+        FUNCTION CALL:
+            K_HSS = HSS1D_compress_submatrix_fsym_giventree(X,TREE,Box_dn,Box_up,acc,params,dim)
+
+        DESCRIPTION:
+            Given points on a few layers on a curve X, symmetric kernel and parameters, it 
+            generates an HSS compressed form of a submatrix of K[X,X] given the tree structure in 
+            TREE.
+
+        INFILE VARIABLES:
+            radius_rel (double) specifies the relative radius of the proxy circles. default = 1.75.
+            nproxy (int) specifies the number of samples to be used on the proxy circles. 
+                default = 50.
+        
+        INPUT:
+            X is an (N x 2) array with sorted points in a few layers along a curve (usually a box 
+                boundary or an interface between two boxes). 
+            TREE is a {50 x nboxes} cell array that gives the tree structure. The submatrix that 
+                is compressed corresponds to TREE(:,Box_dn) and TREE(:,Box_up).
+            Box_dn / Box_up are the (nboxes x 1) boolean arrays that determine the row / column 
+                subtrees.
+            acc (double) is the desired accuracy.
+            params is a struct of kernel evaluation parameters that can be generated using 
+                ../Common/HSS_tree_parameters.m.
+            dim (int) is the dimension of kernel (scalar -> dim = 1)
+        
+        OUTPUT:
+            K_HSS is the cell array containing the HSS tree and skeleton information 
+                (see ../Common/box_constants for details)
+    }
+
+    HSS1D_compress_submatrix_nsym_giventree
+    {
+        FUNCTION CALL:
+            K_HSS = HSS1D_compress_submatrix_nsym_giventree(X,TREE,Box_dn,Box_up,acc,params,dim)
+
+        DESCRIPTION:
+            Given points on a few layers (# of layers?) on a curve X, non-symmetric kernel and 
+            parameters, it generates an HSS compressed form of a submatrix of K[X,X] given the 
+            tree structure in TREE.
+        
+        INFILE VARIABLES:
+            radius_rel (double) specifies the relative radius of the proxy circles. default = 1.75.
+            nproxy (int) specifies the number of samples to be used on the proxy circles. 
+                default = 50.
+        
+        INPUT:
+            X is an (N x 2) array with sorted points in a few layers along a curve (usually a box 
+                boundary or an interface between two boxes). 
+            TREE is a {50 x nboxes} cell array that gives the tree structure. The submatrix that 
+                is compressed corresponds to TREE(:,Box_dn) and TREE(:,Box_up).
+            Box_dn / Box_up are the (nboxes x 1) boolean arrays that determine the row / column 
+                subtrees.
+            acc (double) specifying the desired accuracy.
+            params is a struct of kernel evaluation parameters that can be generated using 
+                ../Common/HSS_tree_parameters.m
+            dim (int) is the dimension of kernel (scalar -> dim = 1).
+        
+        OUTPUT:
+            K_HSS is the cell array containing the HSS tree and skeleton information 
+                (see ../Common/box_constants for details)
+    }
+
+    HSS1D_compressLR_fsym
+    {
+        FUNCTIN CALL:
+            K_HSS = HSS1D_compressLR_fsym(U,V,TREE,acc)
+
+        DESCRIPTION:
+            This function compresses the low-rank fully-symmetric matrix UV' into HSS form (K_HSS).
+            It is used for compressing the interpolation operators in HSS2D.
+        
+        INFILE VARIABLES:
+            radius_rel (double) specifies the relative radius of the proxy circles. default = 1.75.
+            nproxy (int) specifies the number of samples to be used on the proxy circles. 
+                default = 50.
+        
+        INPUT:
+            U is the left low rank (n x q) matrix
+            V is the right low rank (n x q) matrix
+            TREE is the {7 x nboxes} cell array that gives the underlying binary tree structure of 
+                K_HSS.
+            acc (double) is the desired accuracy.
+        
+        OUTPUT:
+            K_HSS is the {50 x nboxes} cell array of the HSS matrix UV'.
+    }
+
+    HSS1D_compressLR_nsym
+    {
+        FUNCTION CALL:
+            K_HSS = HSS1D_compressLR_nsym(U,V,TREE,acc)
+
+        DESCRIPTION:
+            This function compresses the low-rank non-symmetric matrix UV' into HSS form (K_HSS). 
+            It is used for compressing the interpolation operators in HSS2D.
+        
+        INFILE VARIABLES:
+            radius_rel (double) specifies the relative radius of the proxy circles. default = 1.75.
+            nproxy (int) specifies the number of samples to be used on the proxy circles. 
+                default = 50.
+        
+        INPUT:
+            U is the left low rank (n x q) matrix
+            V is the right low rank (n x q) matrix
+            TREE is the {7 x nboxes} cell array that gives the underlying binary tree structure of 
+                K_HSS.
+            acc (double) is the desired accuracy.
+            
+        OUTPUT:
+            K_HSS is the {50 x nboxes} cell array of the HSS matrix UV'.
+    }
+
+    HSS1D_reducelev_fsym
+    {
+        FUNCTION CALL:
+            ENEW = HSS1D_reducelev_fsym(E,acc)
+
+        DESCRIPTION:
+            This function reduces one level of the full-symmetric HSS matrix E by eliminating leaf 
+            K_HSS, updating their parent's interpolation matrix R, and recompressing up the tree.  
+
+        INPUT:
+            E is a {50 x nbox} cell array containing HSS info for matrix E 
+            acc (double) is the desired accuracy.
+        
+        OUTPUT:
+            E_NEW is the {50 x nbox_NEW} cell array containing HSS info for reduced E.
+    }
+
+    HSS1D_reducelev_nsym
+    {
+        FUNCTION CALL:
+            ENEW = HSS1D_reducelev_nsym(E,acc)
+
+        DESCRIPTION:
+            This function reduces one level of the non-symmetric HSS matrix E by eliminating leaf 
+            K_HSS, updating their parent's interpolation matrix R, and recompressing up the tree.  
+
+        INPUT:
+            E is a {50 x nbox} cell array containing HSS info for matrix E.
+            acc (double) is the desired accuracy.
+        
+        OUTPUT:
+            E_NEW is the {50 x nbox_NEW} cell array containing HSS info for reduced E.
+    }
+
+
+
+===================================================================================================
+===================================================================================================
+INVERT
+
+
+    HSS1D_invert_fsym
+    {
+        FUNCTION CALL:
+            [HSSinv,FTinv] = HSS1D_invert_fsym(K_HSS,acc)
+
+        DESCRIPTION:
+            This function inverts a fully-symmetric HSS1D matrix K_HSS to desired accuracy acc.
+
+        INPUT:
+            K_HSS is the {50 x nboxes} cell array that stores the HSS matrix to be inverted.
+            acc (double) is the desired accuracy.
+
+        OUTPUT:
+            HSSinv is a <3 x nboxes> cell array, corresponding to the EFG structure in 
+                the Martinsson-Rokhlin paper.  
+     
+            HSSinv{BOX.Linv,BOX.Rinv and BOX.Dinv,nboxe} correspond to the diagonal
+               blocks of the telescopic factorization of the inverse as explained in the
+               CMZ_2012 paper. Linv matrices are not explicitly computed because of symmetry 
+               (Linv = Rinv.'). That is, at each level the inverse can be written as: 
+
+                        (K_HSS)^{-1} = Dinv + Linv*(M+E)^{-1}*Rinv
+
+            FTinv is the schur complement matrix of the HSSinv structure at the top resulting from 
+                the merge of its children's interactions. It can also be considered Dinv for
+                the top box. 
+
+    }
+
+    HSS1D_invert_nsym
+    {
+        FUNCTION CALL:
+            [HSSinv,FTinv] = HSS1D_invert_nsym(K_HSS,acc)
+
+        DESCRIPTION:
+            This function inverts a fully-symmetric HSS1D matrix K_HSS to desired accuracy acc.
+
+        INPUT:
+            K_HSS is the {50 x nboxes} cell array that stores the HSS matrix to be inverted.
+            acc (double) is the desired accuracy.
+
+        OUTPUT:
+            HSSinv is a {3 x nboxes} cell array, corresponding to the HSSinv structure in 
+                the Martinsson-Rokhlin paper.  
+
+            HSSinv{BOX.Linv,BOX.Rinv and BOX.Dinv,nboxes) correspond to the diagonal
+                blocks of the telescopic factorization of the inverse as explained in the
+                CMZ_2012 paper. That is, at each level the inverse can be written as: 
+
+                        (K_HSS)^{-1} = Dinv + Linv*(M+E)^{-1}*Rinv
+
+            FTinv is the schur complement matrix of the HSSinv structure at the top resulting from 
+                the merge of its children's interactions. It can also be considered Dinv for the 
+                top box. 
+    }
+
+    HSS1D_invertp_fsym
+    {
+        FUNCTION CALL:
+            [HSSinv,FTinv,FT] = HSS1D_invertp_fsym(K_HSS,acc)
+
+        DESCRIPTION:
+            This function inverts a full-symmetric HSS1D matrix K_HSS to desired accuracy acc using
+            pseudo inverse to invert blocks in the structure.
+
+        INPUT:
+            K_HSS is the {50 x nboxes} cell array that stores the HSS matrix to be inverted.
+            acc (double) is the desired accuracy
+
+        OUTPUT:
+            HSSinv is a {3 x nboxes} cell array, corresponding to the HSSinv structure in 
+                the Martinsson-Rokhlin paper.  
+     
+            HSSinv{BOX.Linv,BOX.Rinv and BOX.Dinv,nboxes) correspond to the diagonal
+                blocks of the telescopic factorization of the inverse as explained in the
+                CMZ_2012 paper. Linv matrices are not explicitly computed because of symmetry 
+                (Linv = Rinv.'). That is, at each level the inverse can be written as: 
+
+                        (K_HSS)^{-1} = Dinv + Linv*(M+E)^{-1}*Rinv
+
+            FTinv is the schur complement matrix of the HSSinv structure at the top resulting from 
+                the merge of its children's interactions. It can also be considered Dinv for the 
+                top box. 
+    }
+
+    HSS1D_invertp_nsym
+    {
+        FUNCTION CALL:
+            [HSSinv,FTinv] = HSS1D_invertp_nsym(K_HSS,acc)
+
+        DESCRIPTION:
+            This function inverts a non-symmetric HSS1D matrix K_HSS to desired accuracy acc using
+            pseudo inverse to invert blocks in the structure.
+
+        INPUT:
+            K_HSS is the {50 x nboxes} cell array that stores the HSS matrix to be inverted.
+            acc (double) is the desired accuracy
+
+        OUTPUT:
+            HSSinv is a {3 x nboxes} cell array, corresponding to the HSSinv structure in 
+                the Martinsson-Rokhlin paper.  
+     
+            HSSinv{BOX.Linv,BOX.Rinv and BOX.Dinv,nboxes) correspond to the diagonal
+                blocks of the telescopic factorization of the inverse as explained in the
+                CMZ_2012 paper. That is, at each level the inverse can be written as: 
+
+                        (K_HSS)^{-1} = Dinv + Linv*(M+E)^{-1}*Rinv
+
+            FTinv is the schur complement matrix of the HSSinv structure at the 
+                top resulting from the merge of its children's interactions. 
+                It can also be considered Dinv for the top box.
+    }
+
+    HSS1D_merge_fsym
+    {
+        FUNCTION CALL:
+            [EHSS,X_sort,J] = HSS1D_merge_fsym(E1,E2,X,lev,acc,opts)
+
+        DESCRIPTION:
+            This function merges two fully-symmetric HSS structures encoded in E1 and E2 into a 
+            2 x 2 block diagonal HSS matrix. In the HSS2D inversion algorithm, these blocks often 
+            come from the restriction of Schur complement matrices.
+
+        INPUT:
+            E1,E2 are (50 x n1,n2) cell arrays containing HSS info for matrices E1,E2
+            X,lev are tree information relevant if we re-sort merged tree points in a curve. X is 
+                the set of points where E1 and E2 are defined. The parity of lev determines how X 
+                is oriented.
+            acc (double) is the desired accuracy.
+            opts is a string specifying whether or not to reduce each tree by one level.
+                opts == 'concatenate', we simply concatenate both trees.
+                opts == 'align', we align leaf boxes from both trees, which we assume have the
+                    same structure up to sorting leaves appropriately. This is often needed if 
+                    these correspond to close-to-touching curves, for which the corresponding off-
+                    diagonal interactions are not HSS unless we re-order the indices along the 
+                    curve.
+
+        OUTPUT:
+            EHSS is a {50 x nboxes} cell array of the merged HSS matrix with nboxes = n1+n2+1.
+            X_sort is a (N x 2) array of the sorted set of points where EHSS is defined
+            J is a (N x 1) permutation vector such that X_sort = X(J,:).
+
+    }
+
+    HSS1D_merge_nsym
+    {
+        FUNCTION CALL:
+            [EHSS,X_sort,J] = HSS1D_merge_nsym(E1,E2,X,lev,acc,opts)
+
+        DESCRIPTION:
+            This function merges two non-symmetric HSS structures encoded in E1 and E2 into a 
+                (2 x 2) block diagonal HSS matrix. In the HSS2D inversion algorithm, these blocks 
+                often come from the restriction of Schur complement matrices.
+
+        INPUT:
+            E1,E2 are {50 x n1,n2} cell arrays containing HSS info for matrices E1,E2
+            X,lev are tree information relevant if we re-sort merged tree points in a curve. X is 
+                the set of points where E1 and E2 are defined. The parity of lev determines how X 
+                is oriented.
+            acc (double) is the desired accuracy
+            opts is a string specifying whether or not to reduce each tree by one level.
+                opts == 'concatenate', we simply concatenate both trees.
+                opts == 'align', we align leaf boxes from both trees, which we assume have the same
+                    structure up to sorting leaves appropriately. This is often needed if these
+                    correspond to close-to-touching curves, for which the corresponding off-
+                    diagonal interactions are not HSS unless we re-order the indices along the 
+                    curve.
+        OUTPUT:
+            EHSS is a {50 x nboxes} cell array of the merged HSS matrix with nboxes = n1+n2+1.
+            X_sort is a (N x 2) array of the sorted set of points where EHSS is defined
+            J is a (N x 1) permutation vector such that X_sort = X(J,:).
+    }
+
+    HSS1D_transforminv_fsym
+    {
+        FUNCTION CALL:
+            Kinv_HSS = HSS1D_transforminv_fsym(K_HSS,HSSinv,FTinv)
+
+        DESCRIPTION:
+           This function converts the inverse of a full-symmetric HSS matrix A in the HSSinv 
+           format to the same HSS format as A. This is performed by computing sibling interactions 
+           for non-leaf boxes and converting Linv and Rinv matrices into interpolation matrices 
+           that look like [I T].
+
+        INPUT:
+            K_HSS is the {50 x nboxes} cell array that encodes the HSS structure of A.
+            HSSinv, FTinv encode the inverse of A in the HSSinv format and are the output of 
+                function HSS1D_invert_fsym(..).
+
+        OUTPUT:
+            Kinv_HSS is the {50 x nboxes} cell array that encodes the HSS structure of inv(A).
+    }
+
+    HSS1D_transforminv_nsym
+    {
+        FUNCTION CALL:
+            Kinv_HSS = HSS1D_transforminv_nsym(K_HSS,HSSinv,FTinv)
+    
+        DESCRIPTION:
+            This function converts the inverse of a non-symmetric HSS matrix A in the HSSinv 
+            format to the same HSS format as A. This is performed by computing sibling 
+            interactions for non-leaf boxes and converting Linv and Rinv matrices into 
+            interpolation matrices that look like [I T].
+    
+        INPUT:
+            K_HSS is the {50 x nboxes} cell array that encodes the HSS structure of A.
+            HSSinv, FTinv encode the inverse of A in the HSSinv format and are the output of 
+                function HSS1D_invert_nsym(..).
+    
+        OUTPUT:
+            Kinv_HSS is the  {50 x nboxes} cell array that encodes the HSS sturcture of inv(A).
+    }
+
+
+
+===================================================================================================
+===================================================================================================
+APPLY
+
+
+    BHSS1D_apply_fsym
+    {
+        FUNCTION CALL:
+            Y = BHSS1D_apply_fsym(K11,K12,K21,K22,B_dn,B_up,I_dn,I_up,X)
+
+        DESCRIPTION:
+            This function performs a fast matrix-vector multiply Y=AX, where A is a submatrix of a 
+            2x2 block matrix with full-symmetric HSS1D elements; it is specified by parameters 
+            {K11,K12,K21,K22,B_dn,B_up,I_dn,I_up}. X is a given input vector and Y is the solution 
+            vector.
+            
+        INPUT:
+            A denotes the submatrix of the 2x2 HSS1D block matrix
+                K = [K11 K12 ; K21 K22]
+            I_dn / I_up {i,j} are boolean index vectors that specify the submatrix A as follows:
+                A = [K11(I_dn{1,1},I_up{1,1}) K12(I_dn{1,2},I_up{1,2}) ; 
+                     K21(I_dn{2,1},I_up{2,1}) K22(I_dn{2,2},I_up{2,2})]
+            B_dn / B_up {i,j} are boolean index vectors that specify the boxes in the subtree 
+                taken from Kij. They can to be precomputed as follows:
+                    [B_dn{i,j},B_up{i,j}] = HSS1D_apply_submatrix_boxes(Kij,I_dn{i,j},I_up{i,j}); 
+            X = [ X1 ; X2 ] is the vector to be left multiplied by A.
+        
+        OUTPUT:
+            Y = AX is the vector with
+                [Y1 ; Y2] = [ A11*X1 + A12*X2 ; A21*X1 + A22*X2 ];
+    }
+
+    BHSS1D_apply_nsym
+    {
+        FUNCTION CALL:
+            Y = BHSS1D_apply_nsym(K11,K12,K21,K22,B_dn,B_up,I_dn,I_up,X)
+
+        DESCRIPTION:
+            This function performs a fast matrix-vector multiply Y=AX, where A is a submatrix of a 
+            2x2 block matrix with non-symmetric HSS1D elements; it is specified by parameters 
+            {K11,K12,K21,K22,B_dn,B_up,I_dn,I_up}. X is a given input vector and Y is the vector.
+        
+        INPUT:
+            A denotes the submatrix of the 2x2 HSS1D block matrix
+                K = [K11 K12 ; K21 K22]
+            I_dn / I_up {i,j} are boolean index vectors that specify the submatrix A as follows:
+                A = [K11(I_dn{1,1},I_up{1,1}) K12(I_dn{1,2},I_up{1,2}) ; 
+                     K21(I_dn{2,1},I_up{2,1}) K22(I_dn{2,2},I_up{2,2})]
+            B_dn / B_up {i,j} are boolean index vectors that specify the boxes in the subtree 
+                taken from Kij. They can to be precomputed as follows:
+                    [B_dn{i,j},B_up{i,j}] = HSS1D_apply_submatrix_boxes(Kij,I_dn{i,j},I_up{i,j});
+            X = [ X1 ; X2 ] is the vector to be left multiplied by A.
+        
+        OUTPUT:
+            Y = AX is the vector with
+                [Y1 ; Y2] = [ A11*X1 + A12*X2 ; A21*X1 + A22*X2 ];
+    }
+                
+    HSS1D_apply_fsym
+    {
+        FUNCTION CALL:
+            uu = HSS1D_apply_fsym(K_HSS,qq)
+
+        DESCRIPTION:
+            This function performs a fast matrix-vector multiply of a square, full-symmetric HSS1D 
+            matrix and a vector : uu=Aqq
+        
+        INPUT:
+            A denotes the matrix encoded in HSS1D structure K_HSS.
+            qq is the vector to be multiplied by A.
+        
+        OUTPUT:
+            uu = Aqq vector.
+    }
+            
+    HSS1D_apply_nsym
+    {
+        FUNCTION CALL:
+            uu = HSS1D_apply_nsym(K_HSS,qq,dim)
+
+        DESCRIPTION:
+            This function performs a fast matrix-vector multiply of an square, non symmetric HSS1D 
+            matrix and a vector : uu=Aqq
+        
+        INPUT:
+            A denotes the matrix encoded in HSS1D structure K_HSS.
+            qq is the vector to be left-multiplied by K_HSS.
+            dim (int) is the dimension of the kernal
+            
+        OUTPUT:
+            uu = Aqq vector.
+    }
+        
+    HSS1D_apply_rect_nsym
+    {
+        FUNCTION CALL:
+            uu = HSS1D_apply_rect_nsym(K_HSS,qq,dim)
+
+        DESCRIPTION:
+            This function performs a fast matrix-vector multiply of rectangular non-symetric HSS1D 
+            matrix and a vector : uu=Aqq.
+        
+        INPUT:  
+            A denotes the matrix encoded in HSS1D structure K_HSS.
+            qq is the vector to be left-multiplied by A.
+            dim (int) is the dimension of the kernal
+            
+        OUTPUT:
+            uu = K_HSS qq
+    }
+
+    HSS1D_apply_submatrix_boxes
+    {
+        FUNCTION CALL:
+            [Box_dn,Box_up] = HSS1D_apply_submatrix_boxes(TREE,I_dn,I_up)
+
+        DESCRIPTION:
+            This function finds the subtrees in the HSS1D structure TREE that correspond to the 
+            submatrix A[I_dn,I_up].
+        
+        INPUT:
+            A denotes the matrix encoded in HSS1D structure TREE.
+            I_dn / I_up are boolean vectors that specify the row / column index sets of the 
+                submatrix of A.
+        
+        OUTPUT:
+            Box_dn / Box_up are the outputted boolean index vectors that specify the boxes of TREE 
+                corresponding to submatrix A[I_dn,I_up]. 
+    }
+
+    HSS1D_apply_submatrix_fsym
+    {
+        FUNCTION CALL:
+            uu = HSS1D_apply_submatrix_fsym(K_HSS,Box_dn,Box_up,I_dn,I_up,qq,dim)
+
+        DESCRIPTION:
+            This function applies a submatrix of a full-symmetric HSS1D matrix to a vector : 
+                uu = K(I_dn,I_up) qq(I_up)
+        
+        INPUT:
+            K denotes the matrix encoded by HSS1D structure K_HSS.
+            I_dn / I_up are boolean vectors that specify the row / column index sets of the 
+                submatrix of K.
+            Box_dn / Box_up are the boolean index vectors specifying the boxes of K_HSS that 
+                correspond to the submatrix. They can be precomputed as follows:
+                    [B_dn,B_up] = HSS1D_apply_submatrix_boxes(K_HSS,I_dn,I_up);
+            qq is the vector to be left multiplied by the submatrix.
+            dim (int) is the dimension of the kernal.
+                
+        OUTPUT:
+            uu is the vector resulting from the matrix-vector multiply  
+                uu = K(I_dn,I_up) qq(I_up)
+    }
+
+    HSS1D_apply_submatrix_nsym
+    {
+        FUNCTION CALL:
+            uu = HSS1D_apply_submatrix_nsym(K_HSS,Box_dn,Box_up,I_dn,I_up,qq,dim)
+
+        DESCRIPTION:
+            This function applies a submatrix of a non-symmetric HSS1D matrix to a vector : 
+                uu = K(I_dn,I_up) qq(I_up)
+        
+        INPUT:
+            K denotes the matrix encoded by HSS1D structure K_HSS.
+            I_dn / I_up are boolean vectors that specify the row / column index sets of the 
+                submatrix of K.
+            Box_dn / Box_up are the boolean index vectors specifying the boxes of K_HSS that 
+                correspond to the submatrix. They can be precomputed as follows:
+                    [B_dn,B_up] = HSS1D_apply_submatrix_boxes(K_HSS,I_dn,I_up);
+            qq is the vector to be left multiplied by the submatrix.
+            dim (int) is the dimension of the kernal.
+            
+        OUTPUT:
+            uu is he vector resulting from the matrix-vector multiply   
+                uu = K(I_dn,I_up) qq(I_up)
+    }
+
+    HSS1D_applyinv_fsym
+    {
+        FUNCTION CALL:
+            xx = HSS1D_applyinv_fsym(K_HSS,HSSinv,FTinv,ff)
+    
+        DESCRIPTION:
+            This function uses the HSSinv structure {HSSinv,FTinv} of a full-symmetric HSS1D 
+            matrix A to apply its inverse : xx = inv(A)ff.
+    
+        INPUT:
+            A is the matrix encoded by HSS1D structure K_HSS
+            HSSinv / FTinv are the hierarchical components of inv(A). They can be precomputed by
+                [HSSinv, FTinv] = HSS1D_invert_fsym(K_HSS,acc)
+            ff is the vector to be left-multiplied by inv(A)
+    
+        OUTPUT:
+            xx is the vector resulting from the matrix-vector multiply
+                xx = inv(A)ff
+    }
+
+    HSS1D_applyinv_nsym
+    {
+        FUNCTION CALL:
+            xx = HSS1D_applyinv_nsym(K_HSS,HSSinv,FTinv,ff,dim)
+    
+        DESCRIPTION:
+            This function uses the HSSinv structure {HSSinv,FTinv} of a non-symmetric HSS1D 
+            matrix A to apply its inverse : xx = inv(A)ff.
+    
+        INPUT:
+            A is the matrix encoded by HSS1D structure K_HSS
+            HSSinv / FTinv are the hierarchical components of inv(A). They can be precomputed by
+               [HSSinv, FTinv] = HSS1D_invert_nsym(K_HSS,acc)
+            ff is the vector to be left-multiplied by inv(A)
+            dim (int) is the dimension of the kernal.
+    
+        OUTPUT:
+            xx is the vector resulting from the matrix-vector multiply
+                xx = inv(A)ff
+    }
+
+
+
+===================================================================================================
+===================================================================================================
+ARITHMETIC
+
+
+
+    HSS1D_transpose
+    {
+        FUNCTION CALL:
+            K_HSSAt = HSS1D_transpose(K_HSS)
+
+        DESCRIPTION:
+            This function returns the HSS structure of the transpose of matrix A.
+        
+        INPUT:
+            K_HSS is the {50 x nbox} cell array that encodes the HSS structure of matrix A.
+        
+        OUTPUT:
+            K_HSSAt is the {50 x nbox} cell array that encodes the HSS structure of matrix A'.
+    }
+
+    HSS1D_scalarmult
+    {
+        FUNCTION CALL:
+            A = HSS1D_scalarmult(c,A)
+
+        DESCRIPTION:
+            This function performs a matrix-scalar product where the input and matrix are in HSS1D 
+            form : A = cA
+        
+        INPUT:
+            c (double) scalar
+            A is the cell array containing an HSS matrix.
+        
+        OUTPUT:
+            A is the cell array containing HSS matrix cA.
+    }
+
+    HSS1D_sum_fsym
+    {
+        FUNCTION CALL:
+            K_HSS_C = HSS1D_sum_fsym(K_HSS_A,K_HSS_B,acc)
+
+        DESCRIPTION:
+            This function adds two full-symmetric HSS matrices A and B that share source and 
+            target trees.
+
+        INPUT: 
+            K_HSS_A is the {50 x nbox} cell array that encodes the HSS structure of matrix A.
+            K_HSS_B is the {50 x nbox} cell array that encodes the HSS structure of matrix B.
+            acc (double) is the desired accuracy.
+
+        OUTPUT:
+            K_HSS_C is the {50 x nbox} cell array that encodes the HSS structure of matrix A + B
+    }
+
+    HSS1D_sum_nsym
+    {
+        FUNCTION CALL:
+            K_HSS_C = HSS1D_sum_nsym(K_HSS_A,K_HSS_B,acc)
+
+        DESCRIPTION:
+            This function adds two non-symmetric HSS matrices A and B that share source and target 
+            trees.
+
+        INPUT: 
+            K_HSS_A is the {50 x nbox} cell array that encodes the HSS structure of matrix A.
+            K_HSS_B is the {50 x nbox} cell array that encodes the HSS structure of matrix B.
+            acc (double) is the desired accuracy.
+
+        OUTPUT:
+            K_HSS_C is the {50 x nbox} cell array that encodes the HSS structure of matrix A + B.
+    }
+
+    HSS1D_OLS
+    {
+        FUNCTION CALL:
+            x = HSS1D_OLS(KHSS,b,acc,tau,mu,maxit,type)
+
+        DESCRIPTION:
+            This function solves the system Ax=b for x using the HSS1D overdetermined least 
+            squares algorithm based on Barlow & Vemulapati's approach (Ken & Greengard 12'). 
+            Alternatively, one can compute using the corrected semi-normal equations R'RX = A'b 
+            where A = QR.
+        
+            (1) The HSS1D structure for A is turned into an augmented sparse system using 
+                equivalent densities as auxiliary variables. 
+            (2) The least squares problem for A turns into a linearly constrained least squares of 
+                the form min{|Ex-b|} s.t. Cx=0 
+            (3) Barlow & Vemulapatti's approach is to turn this into an iteration performing 
+                iterative refinement on a non-constrained, weighted least squares of the form 
+                min{|Ex-b|+tau|Cx|} 
+        
+        INPUT:
+            KHSS is the {50 x nboxes} cell array that encodes matrix A in HSS form.
+            b is the right hand side (N x 1) vector.
+            acc (double) is the desired accuracy.
+            tau is a positive weight on linear constraints. The optimal choice for tau for 
+                precision eps (1e-16 for double) is tau=(mu*cond(A))^(-1/3)
+            mu is a small, positive number for Tikhonov regularization. If mu=0, no regularization 
+                is performed. 
+            maxit max number of iterations
+            type is a string with options 'qr' to use QR decomposition for the iteration, and 'sn' 
+                to use semi-normal equations. 
+        
+        OUTPUT:
+            x is the least squares solution vector of Ax = b.
+    }
+
+    HSS1D_recompress_fsym
+    {
+        FUNCTION CALL:
+            A_NEW = HSS1D_recompress_fsym(A,acc)
+
+        DESCRIPTION:
+            This function recompresses a full-symmetric HSS matrix A, obtaining an optimal 
+            representation (given a goal accuracy) by recursively re-compressing factors that form 
+            neutered columns and rows. This function should be used when A is suboptimal due to 
+            HSS arithmetic (e.g. sum, restriction, low rank update)
+
+            (1) The first part of this algorithm uses SVDs to compress A, a method a adapted from 
+                Jianlin Xia's algorithm on "On the complexity of somehierarchical structured 
+                matrix algorithms", p. 14-19. 
+            (2) We then perform an upward pass where we re-format back into HSS1D form; we define 
+                new skeleton information and interpolation operators and update sibling 
+                interactions accordingly. 
+
+        INPUT:
+            A is a {50 x nboxes} cell array containing HSS info for matrix A. A{36,ibox} and 
+                A{37,ibox} are used to store auxiliary matrices \tilde{T} and R_hat / \tilde{R} as 
+                defined in the paper.
+            acc (double) is the desired accuracy
+        
+        OUTPUT:
+            A_NEW is the {50 x nbox_NEW} cell array containing HSS info for recompressed A.
+    }
+
+    HSS1D_recompress_nsym
+    {
+        FUNCTION CALL:
+            A_NEW = HSS1D_recompress_nsym(A,acc)
+
+        DESCRIPTION:
+            This function that recompresses a non-symmetric HSS matrix A, obtaining an optimal 
+            representation (given a goal accuracy) by recursively re-compressing factors that form 
+            neutered columns and rows. This function should be used when A is suboptimal due to 
+            HSS arithmetic (e.g. sum, restriction, low rank update)
+
+            (1) The first part of this algorithm uses SVDs to compress A, a method a adapted from 
+                Jianlin Xia's algorithm on "On the complexity of somehierarchical structured 
+                matrix algorithms", p. 14-19. 
+            (2) We then perform an upward pass where we re-format back into HSS1D form; we define 
+                new skeleton information and interpolation operators and update sibling 
+                interactions accordingly. 
+
+        INPUT:
+            A is a {50 x nboxes} cell array containing HSS info for matrix A. A{36,ibox} and 
+                A{37,ibox} are used to store auxiliary matrices \tilde{T} and R_hat / \tilde{R} as 
+                defined in the paper.
+            acc (double) is the desired accuracy
+        
+        OUTPUT:
+            A_NEW is the {50 x nbox_NEW} cell array containing HSS info for recompressed A.
+    }
+
+
+
+===================================================================================================
+===================================================================================================
+HELPER
+
+
+
+    ../Common/box_constants
+    {
+        DESCRIPTION:
+            This file defines global constants used for HSS structure indices. It specifies how an 
+            HSS1D matrix is encoded in a cell-array.
+        
+            BOX is a global variable throughout the workspace that defines the indices of an HSS1D 
+            structure consistent with the notation of the paper.
+                BOX.DATA = 1:7;
+                BOX.LEVEL = 2;
+                BOX.PARENT = 3;
+                BOX.C1 = 4;
+                BOX.C2 = 5;
+                BOX.END1 = 6;
+                BOX.END2 = 7;
+                BOX.NSKEL = 8;
+                BOX.KSKEL = 9;
+                BOX.I_SKUP = 20;
+                BOX.I_SKDN = 22;
+                BOX.T_UP = 30;
+                BOX.J_UP = 31;
+                BOX.T_DN = 32;
+                BOX.J_DN = 33;
+                BOX.RHO = 34;
+                BOX.LAMBDA = 35;
+                BOX.M_SELF = 40;
+                BOX.M_SIB = 46;
+            ibox is the index of a box in the HSS tree.
+            HSS is a cell array {50,nboxes} that encodes the HSS1D form of a matrix as follows.
+                HSS{BOX.LEVEL,ibox} - level
+                HSS{BOX.PARENT,ibox} - parent
+                HSS{BOX.C1:C2,ibox} - children c1 and c2
+                HSS{BOX.END1:END2,ibox} - index endpoints
+                HSS{BOX.NSKEL,ibox} - nskel 
+                HSS{BOX.KSKEL,ibox} - kskel
+                HSS{BOX.I_SKUP,ibox} - I_skup outgoing index with skeleton points
+                HSS{BOX.I_SKDN,ibox} - I_skdn incoming index with skeleton points 
+                HSS{BOX.T_UP,ibox} - T_up outgoing interpolation matrix
+                HSS{BOX.J_UP,ibox} - J_up outgoing skeleton permutation vector
+                HSS{BOX.T_DN,ibox} - T_dn incoming interpolation matrix
+                HSS{BOX.J_DN,ibox} - J_dn incoming skeleton permutation vector
+                HSS{BOX.M_SELF,ibox} - Self-Interaction matrices (leaves only) 
+                HSS{BOX.M_SIB,ibox} - Sibling Interaction matrices (except top)
+    }
+
+    TREE = Unifbintree(params)
+    {
+        FUNCTION CALL:
+            TREE = Unifbintree(params)
+    
+        DESCRIPTION:
+            This file is located in the Test/ folder. The function returns the necessary arrays 
+            for a uniformly refined, binary tree (essentially a quadtree) of points in the box 
+            [-1,1]^2, of a fixed depth. It alternates between horizontal and vertical bisection of 
+            resulting boxes. Parent and children lists, as well other index sets needed for the 
+            HSS solver are stored.
+    
+        INPUT:
+            params.depth - int - maximum depth of the quadtree
+            params.X_source - (ns x 2) float array - source points
+            params.h - double - grid spacing
+            params.kh - double - kernel parameter (wave number)
+            params.max_particles - int - maximum number of points in a leaf
+            params.layers - int - number of layers needed for skeletons
+    
+        OUTPUT:
+            TREE - struct - containing the binary tree:
+                .numlev - (depth x 1 int array - boxes per level
+                .leaves - (numleaf x 2) int array -  leaves box numbers and level
+                .BOX (per box info)
+                    .cent  - (total_box x 2) float array - box center
+                    .levbox - (total_box x 1) int array - box level
+                    .parent - (total_box x 1) int array 0 box parents (0 for root node)
+                    .child - (total_par x 2) int array - box's children (non leaf boxes)
+                    .I_src - (nskel x 1) int array - index numbers for points on box before merge
+                    .I_sk - (k_skel x 1) int array - index numbers for points on box boundary 
+                        layers after merging children (so, minus interface)
+                    .n_skel - int - size of I_src
+                    .k_skel - int - size of I_sk
+                    .J - (nskel x 1) int array - [I_sk, I_rs] index with upwards skeleton first,
+                        residual points second. I_sk and I_rs are sorted so that points are on an
+                        oriented curve of layers.
+    }
+
+    HSS1D_check_symmetry
+    {
+        FUNCTION CALL:
+            Err = HSS1D_check_symmetry(A)
+
+        DESCRIPTION:
+            This functions finds the element-wise error of the leaves of an HSS1D structure to 
+            determine if the underlying matrix is symmetric.
+        
+        INPUT:
+            A is a HSS1D structure.
+
+        OUTPUT:
+            Err is the double giving the largest error of all the leaf boxes.
+                    Err = max(Merr(i)) for all leaf boxes i
+                M(i) denotes the self interaction matrix of a leaf box i.
+                Merr(i) = |largest element of M'-M| / |largest element of M|
+    }
+
+    HSS1D_fsym_to_nsym
+    {
+        FUNCTION CALL:
+            KHSS = HSS1D_fsym_to_nsym(KHSS)
+
+        DESCRIPTION:
+            This function augments the full-symmetric HSS1D input by matching incoming and 
+            outgoing skeletons, hence allowing nsym treatment.
+        
+        INPUT:
+            KHSS is an HSS structure of a full-symmetric matrix A.
+            
+        OUTPUT:
+            KHSS is a "non-symmetric" HSS structure of A. 
+    }
+
+    HSS1D_nsym_to_fsym
+    {
+        FUNCTION CALL:
+             KNEW = HSS1D_nsym_to_fsym(KHSS,acc)
+
+        DESCRIPTION:
+            This function converts the non-symmetric HSS matrix KHSS into a full-symmetric HSS 
+            matrix KNEW. This process corresponds to computing (A+A')/2 with HSS1D sum.
+        
+        INPUT:
+            KHSS is the {50 x nboxes} cell array that encodes the HSS matrix to be converted.
+            acc (double) is the desired accuracy.
+        
+        OUTPUT:
+            KNEW is the {50 x nboxes} cell array of the converted HSS matrix.
+    }
+
+    HSS1D_postorder
+    {
+        FUNCTION CALL:
+            order = HSS1D_postorder(TREE)
+
+        DESCRIPTION:
+            This function outputs the box indices of HSS matrix TREE in postorder.
+        
+        INPUT:
+            TREE is the {50,nboxes} cell array of a HSS matrix.
+        
+        OUTPUT:
+            order is the (1 x nboxes) vector of the indices of TREE in postorder.
+    }
+
+    HSS1D_preorder
+    {
+        FUNCTION CALL:
+            order = HSS1D_preorder(TREE)
+
+        DESCRIPTION:
+            This function outputs the box indices of the HSS matrix TREE in preorder.
+        
+        INPUT:
+            TREE is the {50 x nboxes} cell array of a HSS matrix.
+        
+        OUTPUT:
+            order is the (1 x nboxes) vector of the indices of TREE in preorder.
+    }
+
+    HSS1D_sparse_matrix
+    {
+        FUNCTION CALL:
+            KHSS_sp = HSS1D_sparse_matrix(KHSS,tau)
+
+        DESCRIPTION:
+            Given an NxN matrix in HSS1D form, this code produces the corresponding augmented 
+            sparse system of size S ~ NlogN. This can then be used to compute fast arithmetic of 
+            HSS matrices or perform sparse linear algebra such as sparse QR, Cholesky, Least 
+            Squares, etc. 
+
+        INPUT: 
+            KHSS is the HSS structure of a matrix.
+            tau (double) is an option for the OLS code. The submatrix corresponding to rows of 
+            auxiliary variables (upward and downward 'equivalent densities') is multiplied by tau. 
+
+        OUTPUT: 
+            KHSS_sp (sparse, block-banded matrix) =
+                    [D^d L^d  0 ...                   |
+                    |R^d  0  -I ...                   |
+                    |    -I  D^{d-1} ...              |
+                    |    ...              -I          |
+                    |                 -I   D^1 L^1    |
+                    |                      R^1  0  -I |
+                    |                          -I  D^0]
+    }
+
+    HSS1D_split_fsym
+    {
+        FUNCTION CALL:
+            [K1,K2] = HSS1D_split_fsym(KHSS,I1,acc)
+
+        DESCRIPTION:
+            This function splits a full-symmetric HSS matrix K into its diagonal blocks 
+            K1 = K(I1,I1) and K2 = K(~I1,~I1). In order to do this, we note that: 
+                    K(I,I) = D_n(I,I) + R(:,I)'[K^{n-1}]R(:,I) 
+            So, leaf K_HSS must be restricted and the rest re-compressed. If all points are 
+            removed (zero) from a certain subtree, the whole subtree is removed. If the root node 
+            has only one child it is removed. This process is repeated as many times as necessary.
+            This function is used for constructing auxiliary matrices E,F^-1 in HSS2D inversion.
+
+        INPUT: 
+            KHSS is the HSS structure of matrix K.
+            I1 is a (1 x N) boolean vector specifying which points we pick.
+            acc (double) is the desired accuracy.
+
+        OUTPUT: 
+            K1,K2 are the HSS structures of matrices K1 = K(I1,I1), K2 = K(~I1,~I1)
+    }
+
+    HSS1D_split_nsym
+    {
+        FUNCTION CALL:
+            [K1,K2] = HSS1D_split_nsym(KHSS,I1_dn,I1_up,acc)
+
+        DESCRIPTION:
+            This function splits a non-symmetric HSS matrix K into its diagonal blocks 
+            K1 = K(I1,I1) and K2 = K(~I1,~I1). In order to do this, we note that: 
+                    K(I,I) = D_n(I,I) + R(:,I)'[K^{n-1}]R(:,I) 
+            So, leaf K_HSS must be restricted and the rest re-compressed. If all points are 
+            removed (zero) from a certain subtree, the whole subtree is removed. If the root node 
+            has only one child it is removed. This process is repeated as many times as necessary.
+            This function is used for constructing auxiliary matrices E,F^-1 in HSS2D inversion.
+
+        INPUT: 
+            KHSS is the HSS structure of matrix K.
+            I1 is a (1 x N) boolean vector specifying which points we pick.
+            acc (double) is the desired accuracy.
+
+        OUTPUT: 
+            K1,K2 is the HSS structure of matrices K(I1,I1), K(~I1,~I1).
+    }
+
+    HSS1D_symmetrize_fsym
+    {
+        FUNCTION CALL:
+            A_NEW = HSS1D_symmetrize_fsym(A)
+
+        DESCRIPTION:
+            This function enforces that sibling and self interactions are symmetric.
+        
+        INPUT:
+            A is the {50 x nbox} cell array that encodes the HSS info of a matrix.
+        
+        OUTPUT:
+            A_NEW is the {50 x nbox} cell array that encodes the symmetrized matrix.
+    }
+
+    HSS1D_updateLR_fsym
+    {
+        FUNCTION CALL:
+            K_HSS_C = HSS1D_updateLR_fsym(K_HSS_A,U,V,acc)
+
+        DESCRIPTION:    
+            This function computes a low rank update UV' to HSS matrix A.
+
+        INPUT: 
+            K_HSS_A is the {50 x nbox} cell array that encodes the HSS structure of matrix A.
+            U,V are the (n x k) factors of the low rank update.
+            acc (double) is the desired accuracy.
+
+        OUTPUT: 
+            K_HSS_C is the {50 x nbox} cell array that encodes the HSS structure of C = A + UV'.
+    }
+
+
+
+
+===================================================================================================

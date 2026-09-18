@@ -1,0 +1,1350 @@
+===================================================================================================
+==                                                                                               ==
+==                                  HSS2D DOCUMENTATION                                          ==
+== A. Szymczak, E. Corona                                                                        ==
+===================================================================================================
+Copyright (C) 2011-2013 E. Corona, P.G. Martinsson, D. Zorin
+
+
+
+TABLE OF CONTENTS
+    NOTATION
+    INPUT
+        HSS_tree_parameters
+        Kernel_Eval
+    BUILD TREE
+        HSS2D_build_tree_fsym
+        HSS2D_build_tree_nsym
+        levHSS
+        interpolation_operator
+        interpolation_operator_HSS
+        build_box_proxy
+        sort_residual
+        sort_skeleton
+    COMPRESS
+        HSS2D_compress_fsym
+        HSS2D_compress_nsym
+    INVERT
+        HSS2D_invert_fsym
+        HSS2D_invert_nsym
+        HSS2D_build_Finv_fsym
+        HSS2D_build_Finv_nsym
+        HSS2D_build_E_fsym
+        HSS2D_build_E_nsym
+    APPLY
+        HSS2D_apply_fsym
+        HSS2D_apply_TI
+        HSS2D_apply_nsym
+    APPLY INVERSE
+        HSS2D_applyinv_fsym
+        HSS2D_applyinv_TI
+        HSS2D_applyinv_nsym
+        HSS2D_applyFinv_fsym
+        HSS2D_applyFinv_nsym
+    PLOT
+        show_box
+        show_skeletons
+        show_tree
+
+
+
+===================================================================================================
+===================================================================================================
+NOTATION:
+
+    We use the following notation throughout the function descriptions (plain text version of the 
+    notation used in CMZ2012_paper.pdf and QUICK_START.pdf). Subscripts or superscripts will be 
+    suppressed when they are understood (eg. specifying a box or level in the tree). If a box is 
+    understood, an appended 1 or 2 to a variable will generally refer to its children.
+
+        X,I     : sample points and their indices, often used with subscripts _smpl, 
+                    _src, _sk, _rs, and _px for {sample}, {source}, {skeleton}, {residual}, and 
+                    {proxy} sets.
+        K       : kernel function
+        A       : kernel matrix K(X,X)
+        o       : unknown vector of charges
+        f       : known vector of potentials
+        Ao = f  : system to be solved by HSS
+
+        ID      : interpolative decomposition
+        TF      : telescoping factorization
+        b,c     : function variations of the free-space Green's function
+        (N)TI   : (non)-translation invariant
+
+        tree    : the binary tree that makes up the HSS1D or HSS2D structure
+        d       : depth of the tree
+        box     : node in the tree
+        D,L,R   : matrices that make up the TF. Referred to by level or box.
+        T       : interpolation matrices that make up per-box L and R: L = P[I;T], R = [I T]P 
+                    where I is the identity and P is a permutation matrix that moves skeleton 
+                    indices to the front.
+        E,F     : auxiliary matrices used to represent the HSS inverse of A
+
+        n       : size of sample or source set of a box, depending on context
+        k       : size of skeleton set of a box
+        m       : any other understood scalar, generally used to specify size
+
+
+
+===================================================================================================
+===================================================================================================
+INPUT
+
+
+    HSS_tree_parameters
+
+        FUNCTION CALL:
+            params = HSS_tree_parameters(pot,kh,sym,Ng,np,acc,lay,n_cut,TI) 
+
+        DESCRIPTION:
+            This function lets you input parameters for the kernel, binary tree, and compression. 
+            The default discretization is taken to be a regular grid of [-1,1]x[-1,1] consisting 
+            np x np panels, each with Ng x Ng tensor gaussian nodes. This can be changed by 
+            redefining params.X_source after the function terminates. The return value params is 
+            used as an argument in most HSS2D functions, however it must be updated during the 
+            BUILD TREE stage (after HSS2D_bintree_* is called).
+            
+        INPUT:
+            pot     <string>    (.flagpot) Name of the kernel for matrix entries K[p,q].
+                                    See Kernel_Eval for current options.
+            kh      <int>       (.kh) Wavenumber, if applicable. E.g. when evaluating low 
+                                    frequency oscillatory kernels such as the 2D Helmholtz free-
+                                    space Green's function.
+            sym     <bool>      (.sym) Whether or not the kernel is symmetric.
+            Ng      <int>       (.Ng) Number of points along one side of a panel (typically 5 - 9).
+            np      <int>       Number of panels along one side of the domain (for uniform tree).
+            acc     <float>     (.acc) Accuracy of IDs for leaf boxes.
+            lay     <int>       (.layers) Number of boundary layers used for skeleton sets. 
+                                    If kh<30, we suggest lay = 1 or 2 if acc is greater
+                                    or less than 1e-7. If kh>30 we suggest lay=3.
+            n_cut   <int>       (.n_cut) Minimum skeleton set size to switch to HSS form.
+            TI      <bool>      (.transinv) Whether or not kernel is translation invariant.
+
+
+        OUTPUT:
+            params  <struct>    Kernel, tree, and compression parameters for HSS2D algorithms.
+                                    Default values are shown below.
+            
+            Kernel Parameters
+                .flagpot = pot      
+                .kh = kh            
+                .sym = sym          
+                .transinv = TI      
+
+            Discretization Parameters
+                .Ng                 
+                .h = 2/(Ng * np)    Grid spacing of points.
+                .X_source           Source points in discretization. Calculated as guassian 
+                                        quadrature nodes in each panel in [-1,1]x[-1,1].
+                .order = 4;         Order of quadrature.
+                .dr_weights         Duan-Rohklin quadrature weights.
+
+
+            Tree Parameters
+                .max_particles = Ng*Ng      Maximum number of source points allowed in a leaf 
+                                                box.
+                .depth ~ 2log(np);          Maximum depth of quadtree so that a leaf box 
+                                                equals a panel.
+                .bisec_rule = 'uniform'     {'uniform', 'maxpart'} Binary tree stopping criterion. 
+                                            - 'uniform' creates a unifom quadtree of .depth levels 
+                                            - 'maxpart' is an adaptive build where a box is 
+                                                bisected only if it contains greater than 
+                                                max_particles source points and is at a level 
+                                                greater than .depth.
+
+            Compression Parameters
+                .acc = acc
+                .layers = lay
+                .n_cut = n_cut
+                .DOskeletons = true     After the tree is constructed with box centers, 
+                                            this determines whether to proceed in the 
+                                            compression of A by computing skeleton/index sets and 
+                                            interpolation operators.
+                .skel_rule = 'bdry'     {'ID', 'wdec', 'brdy'} Method to construct skeleton sets.
+                                        - 'ID' Skeleton found by interpolatory decomposition.
+                                        - 'wdec' Skeleton pre-determined by Whitney decomposition.
+                                        - 'brdy' Skeleton pre-determined to be .layers layers of 
+                                            points along the boundary of the box.
+                .skel_extra_pts = 0     Boolean value that specifies whether to add extra points 
+                                            to the preset skeleton sets. The extra points are 
+                                            computed by a randomized ID and they are used to keep 
+                                            interpolation accurate. This parameter should be set 
+                                            to true for oscillatory kernels or kernels that don't 
+                                            fulfill a Green's identity in the domain.
+                .INTERform = 'lowrank'  {'dense', 'lowrank'} Determines computation and storage of 
+                                            interpolation operators. 
+                .k_cut = 2500           Minimum skeleton set size to compute L,R matrices with 
+                                            HSS acceleration.
+                .proxy_rule = 'rand'    {'wdec', 'rand', 'brdy', neigh'} Method to construct 
+                                            proxies for equivalent density acceleration.
+                                        - 'wdec' Whitney decomposition.
+                                        - 'rand' Exterior boundary layers plus random points 
+                                            selected from an exponentially decaying distribution.
+                                        - 'brdy' Exterior boundary layers of the box.
+                                        - 'neigh' Proxy taken from skeleton points of neighbors.
+                .lambda = 1             For .proxy_rule='rand', the distribution of proxy points 
+                                            ~ 2^-(lambda*r) where r is the distance.
+                .dim = 3                Dimension of the kernel.
+                .proxy = 0              Proxy to skeleton interactions for NTI kernels. Specifies 
+                                            perturbation functions b and c.
+                .pp = []                Spline data for 3D examples.
+
+
+    Kernel_Eval
+
+        FUNCTION CALL:
+            A = Kernel_Eval(X1,X2,params)
+
+        DESCRIPTION:
+            This function takes 2D point arrays X1 and X2, and returns the matrix 
+            A = K[X1,X2]. The only part of params used is params.flagpot, which is a name for the 
+            kernel function being to be used. A few default kernels are available but you can also 
+            input your own kernel function (see RUNNING THE CODE section).
+
+        INPUT:
+            X1      <mx2 float>     Source points
+            X2      <mx2 float>     Target points (size need not be the same as X1)
+
+            params.flagpot -    'SL_H_2D' - 2D Helmholtz
+                                'SL_H_3D' - 3D Helmholtz
+                                'SL_L_2D' - 2D Laplace
+                                'SL_L_3D' - 3D Laplace
+                                'SL_Y_2D' - 2D Yukawa
+                                'SL_Y_3D' - 3D Yukawa
+                                'PSL_L_2D' - Smooth perturbation of 2D Laplace
+
+
+
+===================================================================================================
+===================================================================================================
+BUILD TREE 
+(binary tree, index sets, interpolation operators)
+
+
+    HSS2D_build_tree_fsym
+        
+        FUNCTION CALL:
+            [INFO_TREE] = HSS2D_build_tree_fsym(params)
+
+        DESCRIPTION:
+            This function does most of the work in compressing A as HSS2D. It constructs the 
+            binary tree with the index sets and interpolation operators for each box. It is 
+            assumed that the associated kernel is symmetric (fsym). 
+
+            The HSS2D data structure is a binary tree (essentially a quadtree) subdivision of a 
+            planar surface of maximum depth params.depth. It is constructed by recursively 
+            alternating between horizontal and vertical bisection of boxes. If params.bisec_rule = 
+            'maxpart', the tree is adaptive and level-restricted. This means that a box is refined 
+            only if the number of source points >= params.max_particles and its level is 
+            <= params.depth.
+
+            The points associated with a box I_src are taken to be the union of the skeleton 
+            points of children. These points are split into skeleton I_sk and residual I_rs sets 
+            in a way depending on params. The method described in the paper takes skeleton points 
+            to be those along the boundary of the box and the residual points to be those along 
+            the interface of the children (params.skel_rule = 'bdry').
+
+            The interpolation matrices T that comprise the left and right factors L and R in the 
+            telescoping factorization are stored for each box. The fast method of computing them 
+            is described in Algorithm 3 and Remark 3.4 of the paper. This corresponds to using 
+            preset boundary layer skeletons (params.skel_rule = 'bdry'), and computing T as 
+            lowrank (params.INTERform = 'lowrank'). In this case, an HSS1D least squares and 
+            randomized ID speedup are used for any box with more points than params.k_cut (default 
+            2500).
+
+            Because special care is needed for 2D compression, the computation of the self (leaf) 
+            and sibling interaction (non-leaf) matrices that comprise D in the telescoping 
+            factorization is held off until later. They are implicitly stored by the index sets.
+
+
+        INPUT:
+            params (see HSS_tree_parameters.m) HSS2D parameters.
+
+                  
+        OUTPUT:
+            INFO_TREE       <struct>        The data structure for HSS2D. It stores the 
+                                                interpolation matrices and index sets in a binary 
+                                                tree.
+            .depth          <int>           Maximum level of the tree.
+            .numlev         <depthx1 int>   Number of boxes per level.
+            .box_numbers    <sparse int>    Array that stores the box numbers by level in order to
+                                                traverse the tree.
+            .leaves         <mx2 int>       Index and level of each leaf box.
+            
+            .BOX(i) (info for box, including index sets and ID matrices)
+                .cent   <1x2 float>         Box center coordinates.
+                .levbox <int>               Box level in the tree.
+                .parent <int>               Box parent index (0 for root node).
+                .child  <1x2 int>           Box's children indices (non leaf boxes).
+                .I_src  <n_skelx1 int>      All source points in the box.
+                .I_sk   <kx1 int>           Skeleton points in the box sorted by polar angle 
+                                                around the box center.
+                .n_skel <int>               Size of I_src.
+                .k      <int>               Size of skeleton I_sk.
+                .J      <n_skelx1 int>      [I_sk , I_rs] Index with upwards skeleton first, 
+                                                residual points second. Residual points are sorted 
+                                                along the children interface.
+                .T      <kxn_skel-k float> Interpolation matrix that is stored either densely or 
+                                                as a low-rank (T.U,T.V). MATLAB functions 
+                                                interpolation_operator_*.m are used for preset 
+                                                skeletons. Otherwise ID.m is used.
+
+            .LEV(i) (info for level i, for TI kernels)
+                If params.transinv == True, J and T are stored here rather than in .BOX()
+
+
+    HSS2D_build_tree_nsym
+
+        FUNCTION CALL:
+            [INFO_TREE] = HSS2D_build_tree_nsym(params)
+
+        DESCRIPTION:
+            This function does most of the work in compressing A as HSS2D. It constructs the 
+            binary tree with the index sets and interpolation operators for each box while making 
+            no assumptions on the symmetry of the associated kernel.
+
+            The HSS2D data structure is a binary tree (essentially a quadtree) subdivision of a 
+            planar surface of maximum depth params.depth. It is constructed by recursively 
+            alternating between horizontal and vertical bisection of boxes. If params.bisec_rule = 
+            'maxpart', the tree is adaptive and level-restricted. This means that a box is refined 
+            only if the number of source points >= params.max_particles and its level is <= params.
+            depth.
+
+            The points associated with a box I_src are taken to be the union of the skeleton 
+            points of children. These points are split into skeleton I_sk and residual I_rs sets 
+            in a way depending on params. The method described in the paper takes skeleton points 
+            to be those along the boundary of the box and the residual points to be those along 
+            the interface of the children (params.skel_rule = 'bdry').
+
+            The interpolation matrices T_up and T_dn that comprise the left and right factors L 
+            and R in the telescoping factorization are stored for each box. The fast method of 
+            computing them is described in Algorithm 3 and Remark 3.4 of the paper. This 
+            corresponds to using preset boundary layer skeletons (params.skel_rule = 'bdry'), and 
+            computing T as lowrank (params.INTERform = 'lowrank'). In this case, an HSS1D least 
+            squares and randomized ID speedup are used for any box with more points than params.
+            k_cut (default 2500). 
+
+            Because special care is needed for 2D compression, the computation of the self (leaf) 
+            and sibling interaction (non-leaf) matrices that comprise D in the telescoping 
+            factorization is held off until later. They are implicitly stored by the index sets.
+
+
+        INPUT:
+            params (see HSS_tree_parameters.m) HSS2D parameters.
+
+                  
+        OUTPUT:
+            INFO_TREE       <struct>        The data structure for HSS2D. It stores the 
+                                                interpolation matrices and index sets in a binary 
+                                                tree.
+            .depth          <int>           Maximum level of the tree.
+            .numlev         <depthx1 int>   Number of boxes per level.
+            .box_numbers    <sparse int>    Array that stores the box numbers by level in order to
+                                                travese the tree.
+            .leaves         <mx2 int>       Index and level of each leaf box.
+
+            .BOX(i) (info for box i: index sets and and ID operator)
+                .cent   <1x2 float>         Box center coordinates.
+                .levbox <int>               Box level in the tree.
+                .parent <int>               Box parents (0 for root node).
+                .child  <1x2 int>           Box's children (non leaf boxes).
+                .I_src  <n_skelx1 int>      All source points in the box.
+                .I_sk   <kx1 int>           Skeleton points in the box sorted by polar angle 
+                                                around the box center.
+                .n_skel <int>               Size of I_src.
+                .k      <int>               Size of skeleton I_sk.
+                .J      <n_skelx1 int>      [I_sk , I_rs] Index with upwards skeleton first, 
+                                                residual points second. Residual points are sorted 
+                                                along the children interface.
+                .T_up   <kxn_skel-k float> Upwards interpolation matrix (comprises L).
+                .T_dn   <kxn_skel-k float> Downwards interpolation matrix (comprises R) that is 
+                                                stored either densely or as a low rank (T.U,T.V) 
+                                                pair. MATLAB functions interpolation_operator_*.m 
+                                                are used for preset skeletons. Otherwise ID.m is 
+                                                used.
+
+
+    levHSS
+
+        FUNCTION CALL:
+            lhss = levHSS(TREE,n_cut,trinv) 
+
+        DESCRIPTION:
+            This function does a downward pass of the tree and finds the first level that has a 
+            box with less than n_cut points. If no box has more than n_cut points, then lHSS = -1. 
+            The return value determines the cutoff level used in the O(N) version of the COMPRESS 
+            and INVERT stages; matrices in boxes above level lhss are compressed, and those below 
+            or on level lhss are stored densely. This function needs to be called by the user for 
+            the O(N) algorithm and the return value needs to be stored in params.lev_hss 
+            (the struct created in HSS_tree_parameters.m).
+            
+        INPUT:
+            TREE    <struct>    HSS binary tree data (e.g. output of HSS2D_bintree_*).
+            n_cut   <int>       Threshold box size (e.g. params.n_cut from HSS_tree_parameters).
+            triinv  <bool>      Tree traversal per box or per level (for translation invariance).
+        
+        OUTPUT:
+            lhss    <int>       First level in the tree that doesn't use HSS1D speedup.
+
+
+    interpolation_operator
+
+        FUNCTION CALL:
+            T = interpolation_operator(cB,lev,par,X_proxy,X1,X2,type,lr,q)
+
+        DESCRIPTION:
+            This function calculates the interpolation operators T that comprise L and R in the 
+            telescoping factorization. To speedup computation we use equivalent densities, and if 
+            lr=true, we compress K(X_proxy,X2) as low-rank by a randomized ID. We solve for T by 
+            least squares:
+
+                        T(X1,X2) = K(X_proxy,X1) \ K(X_proxy,X2)
+
+            In other words, for 
+
+                        phi_1 = T(X1,X2) phi_2
+                        K(X_proxy,X1) phi_1 = K(X_proxy,X2) phi_2
+     
+            This function corresponds to Algorithm 3 in the paper without the HSS1D compression. 
+            It is called within HSS2D_bintree_* during the BUILD TREE stage for boxes with 
+            k < par.n_cut.
+
+        INPUT: 
+            cB      <2x1 float>         Center of the box.
+            lev     <int>               Level in the tree.
+            par     <struct>            (see HSS_tree_parameters.m) Solve parameters.
+            X_proxy <mx2 float>         Proxy points used in place of X_ext.
+            X1      <kx2 float>         Skeleton points.                      
+            X2,     <(n-k)x2 float>        Residual points.
+            type    <string>            {'box_2_proxy', 'proxy_2_box'} Direction of interpolation.
+            lr      <bool>              Whether T is stored densely or as low-rank. If true, 
+                                            K(X_proxy,X2) is compressed as low-rank using a random 
+                                            ID (LRID_rand.m).
+            q       <(depth+1)x1 int>   Array of interpolation operator ranks (used in randomized 
+                                            ID to produce a first guess).
+
+        OUTPUT: 
+            T[X1,X2] <kx(n-k) float>    Interpolation Operator stored densely or as a low-rank UV' 
+                                        pair. If q is the rank, then U is kxq and V is qxm  
+
+
+    interpolation_operator_HSS
+
+        FUNCTION CALL:
+             T = interpolation_operator_HSS(cB,lev,par,X_proxy,X1,X2,type,q)
+
+        DESCRIPTION:
+            This function calculates the interpolation operators T that comprise L and R in the 
+            telescoping factorization. To speedup computation we use equivalent densities (proxy 
+            set), we compress K(X_proxy,X1) as HSS1D, and we compress K(X_proxy,X2) as low-rank. 
+            We solve for T by HSS1D least squares:
+
+                        T(X1,X2) = K(X_proxy,X1) \ K(X_proxy,X2)
+
+            In other words, for 
+
+                        phi_1 = T(X1,X2) phi_2
+                        K(X_proxy,X1) phi_1 = K(X_proxy,X2) phi_2
+     
+            This function corresponds to Algorithm 3 in the paper. It differs from 
+            interpolation_operator.m by using HSS1D compression and least-squares. It is called 
+            within HSS2D_bintree_* during the BUILD TREE stage for boxes with k > par.n_cut.
+
+        INPUT: 
+            cB      <2x1 float>         Center of the box.
+            lev     <int>               Level in the tree.
+            par     <struct>            (see HSS_tree_parameters.m) Solve parameters.
+            X_proxy <mx2 float>         Proxy points used in place of X_ext.
+            X1      <kx2 float>         Skeleton points.                      
+            X2,     <(n-k)x2 float>     Residual points.
+            type    <string>            {'box_2_proxy', 'proxy_2_box'} Direction of interpolation.
+            q       <(depth+1)x1 int>   Array of interpolation operator ranks (used in randomized 
+                                        ID to produce a first guess).
+
+            OUTPUT: 
+                T[X1,X2] <kxq,qx(n-k) float>    Interpolation operator stored as low-rank UV' 
+                                                pair, where q is the rank.
+
+
+    build_box_proxy
+
+        FUNCTION CALL:
+            [X_proxy,X_extra] = build_box_proxy(cB,colrad,rowrad,layers,h)
+
+        DESCRIPTION:
+            This function constructs the proxy of exterior points surrounding a box. By placing 
+            point charges (discrete analog of an equivalent density) around the boundary, we can 
+            represent the interaction between the target points (inside the box) and the source 
+            points (outside the box). This allows for the accelerated compression of off-diagonal 
+            block rows and columns of the HSS matrix. 
+
+            The width of the layer of proxy points depends on the accuracy requested. We found for 
+            the Laplace kernel, a layer of width 1 and width 2 leads to relative accuracy of about 
+            10^-5 and 10^-10, respectively. For the Helmholtz kernel similar accuracy was 
+            observed, however, thicker skeleton layers are recommended to avoid problems 
+            associated with resonances.
+
+            
+                        * * * * * * * * * *         * proxy points (eg. 2 layers)
+                        * * * * * * * * * *
+                        * *             * * 
+                        * *             * *  
+                        * *             * * 
+                        * *             * * 
+                        * *             * * 
+                        * * * * * * * * * *
+                        * * * * * * * * * *
+            
+        INPUT:
+            cB      <1x2 float>     Center of the box.
+            colrad  <float>         Half the width of the box.
+            rowrad  <float>         Half the height of the box.
+            layers  <int>           Number of layers around the box.
+            h       <float>         Separation between proxy points (both dimensions).
+        
+        
+        OUTPUT:
+            X_proxy <mx2 float>         Points in the proxy.
+            X_extra <(m-k)x2 float>     Corner points are removed to make the proxy the same 
+                                            size as the skeleton set (see Remark 3.4 of the paper).
+
+
+    sort_residual
+
+        FUNCTION CALL:
+            [X_sort,J] = sort_residual(X,lev)
+
+        DESCRIPTION:
+            This function sorts points along a box interface. If lev is even, the interface is 
+            vertical, if it is odd, horizontal. It is generally called on the residual points of a 
+            box, which are the points along the shared edge of the children. It is used so that 
+            the proxy-residual interaction matrix can be compressed as HSS1D.
+
+        INPUT: 
+            X       <(n-k)x2 float>     Residual points that we want sorted.
+            lev     <int>               Level in the tree.
+
+        OUTPUT:
+            X_sort  <(n-k)x2 float>     Array of sorted points, bottom-top or left-right. 
+            J       <(n-k)x1 int>       Permutation vector such that X_sort = X(J,:)    
+
+
+    sort_skeleton
+
+        FUNCTION CALL:
+            [X_sort,J,I_bd,TREE,card] = sort_skeleton(X,cB,lev,h,lay,type)
+
+        DESCRIPTION:
+            This function sorts points on a box's boundary layers, clockwise around the box 
+            center. It is generally called on the source points of a box and it is used so that 
+            the proxy-skeleton interaction matrix can be compressed as HSS1D.
+
+        INPUT: 
+            X       <nx2 float>     Source points that we want sorted.
+            cB      <1x2 float>     Center of the box.
+            lev     <int>           Level in the tree.
+            h       <float>         Width/length of one grid cell.
+            lay     <int>           Number of boundary layers in the skeleton set.
+            type    <string>        {'north', east', 'south', west'} Edge that comes first.
+
+        OUTPUT:
+            X_sort  <kx2 float>     Sorted points: clockwise edges around the box.
+            J       <kx1 int>       Permutation vector such that X_sort = X(J,:)
+            I_bd    <kx1 bool>      Array that is true for boundary points.
+            TREE    <struct>        Restricted tree (HSS1D) for boundary points.
+            card    <1x4 int>       Sizes for north,east,south,west sides of X.     
+
+
+
+===================================================================================================
+===================================================================================================
+COMPRESS
+(self/sibling interactions)
+
+
+    HSS2D_compress_fsym
+
+        FUNCTION CALL:
+            [A_HSS] = HSS2D_compress_fsym(INFO_TREE,params)
+            
+        DESCRIPTION:
+            Given tree information and parameters, this function returns an array of structs 
+            containing the matrices that comprise D in the telescoping factorization. That is, the 
+            self interaction matrices for leaf boxes and sibling interaction matrices for non-leaf 
+            boxes. It is assumed that the underlying matrix A is symmetric (fsym).
+
+        INPUT:
+            INFO_TREE   <struct>    (output of HSS2D_build_tree_fsym) Binary tree.
+            params      <struct>    (output of HSS_tree_parameters) With added parameters below:
+                .Fopts              {'dense', 'HSS'} 
+                                    - 'dense' Matrices at all boxes in the tree are stored 
+                                        densely.
+                                    - 'HSS' Matrices at boxes above level .lev_HSS in the tree are 
+                                        compressed as HSS1D. Required for the O(N) solver.
+                .lev_HSS            (output of levHSS) Matrices are stored densely (rather than 
+                                        HSS1D) on and below this level of the tree. Automatically 
+                                        set to -1 if Fopts = 'dense'.
+
+                .T_source and .X_source (IGNORE FOR PLANAR SURFACES) are changed only if the 
+                    domain is on a 3D surface. .T_source must be set to the source points used in 
+                    the BUILD TREE stage (the old .X_source). .X_Source must be redefined as the 
+                    parameterization onto the 3D surface. (Note this is still in the testing phase)
+                
+                    .T_source   <Nx2 float>     = params.X_source
+                    .X_source   <Nx3 float>     = [(x(u,v), y(u,v), z(u,v)) for (u,v) in .T_source]
+
+        OUTPUT:
+            A_HSS           <mx1 struct>    D matrices for each box in the tree (or each level for 
+                                                TI kernels)
+            A_HSS(i)                        Info for box i (or level i).
+                .Bself      <nxn float>     Dense self interactions matrix for leaves (between 
+                                                source points within the box). 
+                .B12/.B21   <struct>        Sibling interaction matrix for non-leaves (between 
+                                                children skeleton sets X1,X2). It is stored either 
+                                                densely or as HSS1D depending on params.Fopts.
+                                        
+                                            B12 = K[X1,X2] , B21 = K[X2,X1] = B12'      
+
+
+    HSS2D_compress_nsym
+
+        FUNCTION CALL:
+            [A_HSS] = HSS2D_compress_nsym(INFO_TREE,params)
+            
+        DESCRIPTION:
+            Given tree information and parameters, this function returns an array of structs 
+            containing the matrices that comprise D in the telescoping factorization. That is, the 
+            self interaction matrices for leaf boxes and sibling interaction matrices for non-leaf 
+            boxes. The code makes no assumptions on the symmetry of the associated kernel.
+
+        INPUT:
+            INFO_TREE   <struct>    (output of HSS2D_build_tree_nsym) Binary tree.
+            params      <struct>    (output of HSS_tree_parameters) With added parameters below:
+                .Fopts              {'dense', 'HSS'} 
+                                    - 'dense' Matrices at all boxes in the tree are stored 
+                                        densely.
+                                    - 'HSS' Matrices at boxes above level lev_HSS in the tree are 
+                                        compressed as HSS1D. Required for the O(N) solver.
+                .lev_HSS            (output of levHSS) Matrices are stored densely (rather than 
+                                        HSS1D) on and below this level of the tree. Automatically 
+                                        set to -1 if Fopts = 'dense'.
+
+                .T_source and .X_source (IGNORE FOR PLANAR SURFACES) are changed only if the 
+                    domain is on a 3D surface. .T_source must be set to the source points used in 
+                    the BUILD TREE stage (the old .X_source). .X_Source must be redefined as the 
+                    parameterization onto the 3D surface. (Note this is still in the testing phase)
+                
+                    .T_source   <Nx2 float>     = params.X_source
+                    .X_source   <Nx3 float>     = [(x(u,v), y(u,v), z(u,v)) for (u,v) in .T_source]
+
+        OUTPUT:
+            A_HSS           <mx1 struct>    D matrices for each box in the tree (or each level for 
+                                                TI kernels)
+            A_HSS(i)                        Info for box i (or level i).
+                .Bself      <nxn float>     Dense self interactions matrix for leaves (between 
+                                                source points within the box). 
+                .B12/.B21   <struct>        Sibling interaction matrix for non-leaves (between 
+                                                children skeleton sets X1,X2). It is stored either 
+                                                densely or as HSS1D depending on params.Fopts.
+                                        
+                                            B12 = K[X1,X2] , B21 = K[X2,X1]         
+
+
+
+===================================================================================================
+===================================================================================================
+INVERT 
+(build E,F^-1)
+
+
+    HSS2D_invert_fsym
+
+        FUNCTION CALL:
+            A_HSS = HSS2D_invert_fsym(INFO_TREE,params)
+            
+        DESCRIPTION:
+            General HSS inversion is explained in section 2.4 of the paper (Algorithm 1), where 
+            the matrices D,L,R in the factorization of A^-1 are given in terms of Schur complement 
+            matrices E and F^-1. This function computes E and F^-1 for each box with the 
+            assumption that A is symmetric (fsym). 
+
+            Computation of E and F^-1 at each box requires inverting an nxn matrix which takes
+            O(N^3/2) time for HSS2D (params.Fopts = 'dense'). To achieve linear complexity we 
+            store/compute interpolation operators as low-rank, E as HSS1D, and blocks of F^-1 as 
+            HSS1D or low-rank (params.Fopts = 'HSS'). This is outlined in Algorithm 2, and 
+            detailed in Algorithms 3,4,5. 
+
+            For translation-invariant kernels, one set of matrices per level in the tree need to 
+            be computed, rather than per box.
+        
+        INPUT:
+            INFO_TREE   <struct>    (output of HSS2D_build_tree_fsym) Binary tree information and 
+                                        L,R matrices in the telescoping factorization.
+            params      <struct>    (output of HSS_tree_parameters) With added parameters below.
+                .Fopts              {'dense', 'block', 'HSS'} 
+                                    - 'dense' F^-1 and E are each stored and computed as a single 
+                                        dense matrix : O(N^3/2).
+                                    - 'block' E and blocks of F are stored densely : O(N^3/2).
+                                    - 'HSS' blocks of E and F are compressed : O(N).
+                .lev_HSS            (output of levHSS) Matrices are stored densely on and below 
+                                        this level of the tree. Automatically set to -1 if Fopts = 
+                                        'dense'.
+
+        OUTPUT:
+            A_HSS   <mx1 struct>    A_HSS(i) contains the matrices E and F^-1 used to represent 
+                                    the inverse of A.
+                A_HSS(i).FI.*       (see HSS2D_build_Finv_fsym).
+                A_HSS(i).E          (see HSS2D_build_E_fsym).
+
+
+    HSS2D_invert_nsym
+
+        FUNCTION CALL:
+            A_HSS = HSS2D_invert_nsym(INFO_TREE,params)
+            
+        DESCRIPTION:
+            General HSS inversion is explained in section 2.4 of the paper (Algorithm 1), where 
+            the matrices D,L,R in the factorization of A^-1 are given in terms of Schur complement 
+            matrices E and F^-1. This function computes E and F^-1 for each box without making any 
+            assumptons on the symmetry of A (nsym). 
+
+            Computation of E and F^-1 at each box requires inverting an nxn matrix which takes 
+            O(N^3/2) time for HSS2D (params.Fopts = 'dense'). To achieve linear complexity we 
+            store/compute interpolation operators as low-rank, E as HSS1D, and blocks of F^-1 as 
+            HSS1D or low-rank (params.Fopts = 'HSS'). This is outlined in Algorithm 2, and 
+            detailed in Algorithms 3,4,5. 
+
+            For translation-invariant kernels, one set of matrices per level in the tree need to 
+            be computed, rather than per box.
+        
+        INPUT:
+            INFO_TREE   <struct>    (output of HSS2D_build_tree_nsym) Binary tree information and  
+                                        L,R matrices in the telescoping factorization.
+            params      <struct>    (output of HSS_tree_parameters) With added parameters below.
+                .Fopts              {'dense', 'block', 'HSS'} 
+                                    - 'dense' F^-1 and E are each stored and computed as a single 
+                                        dense matrix : O(N^3/2).
+                                    - 'block' E and blocks of F are stored densely : O(N^3/2).
+                                    - 'HSS' blocks of E and F are compressed : O(N).
+                .lev_HSS            (output of levHSS) Matrices are stored densely on and below 
+                                        this level of the tree. Automatically set to -1 if Fopts = 
+                                        'dense'.
+
+        OUTPUT:
+            A_HSS   <mx1 struct>    A_HSS(i) contains the matrices E and F^-1 used to represent 
+                                    the inverse of A.
+                A_HSS(i).FI.*       (see HSS2D_build_Finv_fsym).
+                A_HSS(i).E          (see HSS2D_build_E_nsym).        
+
+
+    HSS2D_build_Finv_fsym
+
+        FUNCTION CALL:
+            [FI] = HSS2D_build_Finv_fsym(E1,E2,lev,X,J,k,I1_sk,I2_sk,params,opts)
+            
+        DESCRIPTION:
+            This routine returns the four matrices needed to apply F^-1 by the Schur complement 
+            formulae. For a non-leaf box, F is a linear operator defined on the source points. 
+            Physically, it maps charge distributions to fields on this set, adding contributions 
+            from local operators E1,E2 (of the children) and sibling interactions: 
+
+                            F = [E1 K12 ; K21 E2]
+
+            where K12,K21 are kernel evaluations. It is assumed that the corresponding kernel is 
+            symmetric (fsym), so that F and Ei are symmetric matrices. This function is an 
+            implementation of Algorithm 4 in the paper.
+
+            The speed of the algorithm depends on how E and F^-1 are computed/stored, which is 
+            specified by the argument opts, or rather user input params.Fopts of parent function 
+            HSS2D_Inverse-Compression_fsym (where HSS2D_build_Finv_fsym is called).
+
+            For the O(N) algorithm, we reorder the rows and columns by skeleton and residual sets, 
+            partitioning F into the four blocks F_sk, F_r2s, F_s2r, F_rs 
+            (F^{sk}, F^{s<-r}, F^{r<-s}, F^{rs} in the paper).
+
+                            F  =  [ F(I_sk,I_sk)  F(I_sk,I_rs) ]  =   [ F_sk   F_r2s ]            
+                                  [ F(I_rs,I_sk)  F(I_rs,I_rs) ]      [ F_s2r  F_rs  ]            
+
+                            F_* = [ E1_*   K12_* ]      for subscripts * in {sk, r2s, s2r, rs}
+                                  [ K21_*  E2_*  ]
+            
+            Performing block Gaussian elimination we find F^-1 can be represented by the four 
+            matrices F_rs^-1, F_r2s, F_s2r, and S^-1 where S is the Schur complement matrix
+
+                            S = F_sk - F_r2s F_rs^-1 F_s2r
+
+            The computation of these matrices is accelerated by HSS1D and low-rank operations. 
+            Because the skeleton sets are fixed-width around the boundary, F_sk and F_rs can be 
+            interpreted as HSS1D. Because the skeleton and residual sets are close only at a few 
+            points, F_s2r and F_r2s are low-rank.
+ 
+        INPUT:
+            E1,E2           <kxk>           E matrices of the children, stored densely or as HSS1D.
+            lev             <int>           Box level in the tree.
+            X               <2xn float>     X(I_src,:) = [X(I1_sk); X(I2_sk)] merge of 
+                                                skeleton points of children (source points).
+            J               <nx1 int>       = [I_sk I_rs] Indices of skeleton and residual 
+                                                points.
+            k               <1x2 int>       = [k1 k2] Size of children skeleton sets.
+            I1_sk,I2_sk     <kx1 int>       Indices of children skeleton sets.
+            params          <struct>        (see HSS_tree_parameters) HSS2D parameters.
+
+            opts    <string>    {'dense', 'block', 'd2HSS', 'HSS'} Specifies how to compute the 
+                                    blocks of F^-1. It is determined by the lev, params.lev_HSS, 
+                                    and params.Fopts in the parent function 
+                                    HSS2D_invert_fsym.
+
+                                opts = Fopts
+                                if (lev > lev_HSS) : opts = 'dense'
+                                if (lev = lev_HSS and Fopts = 'HSS') : opts = 'd2HSS'
+
+                    - 'dense'   F^-1 is computed as a single dense matrix. E matrices are assumed 
+                                    dense. 
+                    - 'block'   The blocks of FI.* are computed densely. This corresponds to the 
+                                    left side of Algorithm 4.
+                    - 'd2HSS'   The blocks of F^-1 are HSS1D or low-rank. E matrices are assumed 
+                                    dense.
+                    - 'HSS'     The blocks of F^-1 are HSS1D or low-rank. E matrices are HSS1D. 
+                                    This corresponds to the right side of Algorithm 4.
+                    - 'HSStest' Same as 'HSS' but it computes errors of each operation for 
+                                    debugging purposes.
+
+        OUTPUT:
+            FI either stored densely or as a struct of blocks.
+                <nxn float>     Dense matrix of F^-1.
+                <struct>        .rs_Inv     HSS1D of residual block matrix F_rs^-1.
+                                .rs2sk      Low-rank decomposition of F_r2s by randomized ID.
+                                .sk2rs      Not stored because .sk2rs = .rs2sk'.
+                                .SrsInv     HSS1D Inverse of the Schur complement matrix S.
+                                .J          <mx1 int> = J   
+
+
+    HSS2D_build_Finv_nsym
+
+        FUNCTION CALL:
+            HSS2D_build_Finv_nsym(E1,E2,lev,X,J,k,I1_sk,I2_sk,params,opts)
+            
+        DESCRIPTION:
+            This routine returns the four matrices needed to apply F^-1 by the Schur complement 
+            formulae. For a non-leaf box, F is a linear operator defined on the source set. 
+            Physically, it maps charge distributions to fields on this set, adding contributions 
+            from local operators E1,E2 (of the children) and sibling interactions:
+
+                            F = [E1 K12 ; K21 E2]
+
+            where K12,K21 are kernel evaluations. No assumptions are made on the symmetry of the 
+            associated kernel (nsym). This function is an implementation of Algorithm 4 in the 
+            paper.
+
+            The speed of the algorithm depends on how E and F^-1 are computed/stored, which is 
+            specified by the argument opts, or rather user input params.Fopts of parent function 
+            HSS2D_Inverse-Compression_nsym (where HSS2D_build_Finv_nsym is called).
+
+            For the O(N) algorithm, we reorder the rows and columns by skeleton and residual sets, 
+            partitioning F into the four blocks F_sk, F_r2s, F_s2r, F_rs 
+            (F^{sk}, F{s<-r}, F{r<-s}, F{rs} in the paper).
+
+                            F = [F_sk F_r2s ; F_s2r F_rs]
+                            F_* = [E1_* K12_* ; K21_* E2_*]
+            
+            Performing block Gaussian elimination we find F^-1 can be represented by the four 
+            matrices F_rs^-1, F_r2s, F_s2r, and S^-1 where S is the Schur complement matrix
+
+                            S = F_sk - F_r2s F_rs^-1 F_s2r
+
+            The computation of these matrices is accelerated by HSS1D and low-rank operations. 
+            Because the skeleton sets are fixed-width around the boundary, F_sk and F_rs can be 
+            interpreted as HSS1D. Because the skeleton and residual sets are close only at a few 
+            points, F_s2r and F_r2s are lowrank.
+ 
+        INPUT:
+            E1,E2           <kxk>           E matrices of the children, stored densely or as HSS1D.
+            lev             <int>           Box level in the tree.
+            X               <2xn float>     X(I_src,:) = [X(I1_sk); X(I2_sk)] Merge of 
+                                                    skeleton points of children (source set).
+            J               <nx1 int>       = [I_sk I_rs] Indices of skeleton and residual 
+                                                    points.
+            k               <1x2 int>       = [k1 k2] Size of children skeleton sets
+            I1_sk,I2_sk     <kx1 int>       Indices of children skeleton sets.
+            params          <struct>        (see HSS_tree_parameters) Solve parameters.
+
+            opts    <string>    {'dense', 'block', 'd2HSS', 'HSS'} Specifies how to compute the 
+                                    blocks of F^-1. It is determined by the lev, params.lev_HSS, 
+                                    and params.Fopts in the parent function 
+                                    HSS2D_invert_nsym.
+
+                                opts = Fopts
+                                if (lev > lev_HSS) : opts = 'dense'
+                                if (lev = lev_HSS and Fopts = 'HSS') : opts = 'd2HSS'
+
+                                - 'dense'   F^-1 is computed as a single dense matrix. E matrices 
+                                                are assumed dense. 
+                                - 'block'   The blocks of FI.* are computed densely. This 
+                                                corresponds to the left side of Algorithm 4.
+                                - 'd2HSS'   The blocks of F^-1 are HSS1D or low-rank. E matrices 
+                                                are assumed dense.
+                                - 'HSS'     The blocks of F^-1 are HSS1D or low-rank. E matrices 
+                                                are HSS1D. This corresponds to the right side of 
+                                                Algorithm 4.
+                                - 'HSStest' Same as 'HSS' but it computes errors of each operation 
+                                                for debugging purposes.
+
+        OUTPUT:
+            FI either stored densely or as a struct of blocks (either dense or compressed).
+                <nxn float>     Dense matrix of F^-1
+                <struct>        .rs_Inv     HSS1D of residual matrix F_rs^-1
+                                .rs2sk      Low-rank decomposition of F_r2s by randomized ID 
+                                .sk2rs      Low-rank decomposition of F_s2r by randomized ID
+                                .SrsInv     Inverse of the Schur complement matrix S.
+                                .J          <mx1 int> = J   
+
+
+    HSS2D_build_E_fsym
+
+        FUNCTION CALL:
+            [E,Js_J2F] = HSS2D_build_E_fsym(FI,J,T,k,acc,opts)
+            
+        DESCRIPTION:
+            This function is an implementation of Algorithm 5 in the paper - which corresponds to 
+            line 10 of Algorithm 2. For a given box, it computes E as a function of the 
+            interpolation operators and the blocks of F^-1. It assumes that the associated kernel 
+            is symmetric (fsym).
+
+        INPUT:
+            FI      <nxn or struct>     (output of HSS2D_build_Finv_fsym.m) The blocks of F^-1 
+                                            needed to compute E.
+            J       <kx1 int>           [I_sk I_rs] Permutation vector that places skeleton points 
+                                            first, residual points second. 
+            T       <kxk or lr>         Interpolation matrix (stored either densely or as a 
+                                            low-rank (U,V) pair).
+            k       <int>               Size of skeleton.
+            acc     <float>             Desired accuracy.
+            
+            opts    <struct>            .mat determines how E is stored. If 'dense' or 'block', E 
+                                            is dense and .mat.LR specifies if the interpolation 
+                                            operations are stored as lowrank. If .mat = 'HSS', E 
+                                            is HSS1D and interpolation operators are assumed to be 
+                                            lowrank.
+            
+        OUTPUT:
+            E   <kxk or HSS1D>   Schur Complement matrix used to represent A^-1.
+                            
+                            EInv = R*FInv*L = [I T] * FI * [I ; T.']
+                            E = inv(EInv)           
+
+
+    HSS2D_build_E_nsym
+
+        FUNCTION CALL:
+            [E,Js_J2F] = HSS2D_build_E_nsym(FI,J,T_up,T_dn,k,acc,opts)
+            
+         DESCRIPTION:
+            This function is an implementation of Algorithm 5 in the paper - which corresponds to 
+            line 10 of Algorithm 2. For a given box, it computes E as a function of the 
+            interpolation operators and the blocks of F^-1. It makes no assumptions on the 
+            symmetry of the associated kernel (nsym).
+
+        INPUT:
+            FI      <nxn or struct>     (output of HSS2D_build_Finv_fsym.m) The blocks of F^-1 
+                                            needed to compute E.
+            J       <kx1 int>           [I_sk I_rs] Permutation vector that places skeleton points 
+                                            first, residual points second. 
+            T       <kxk or lr>         Interpolation matrix (stored either densely or as a 
+                                            rank (U,V) pair).
+            k       <int>               Size of skeleton.
+            acc     <float>             Desired accuracy.
+            
+            opts    <struct>            .mat determines how E is stored. If 'dense' or 'block', E 
+                                            is dense and .mat.LR specifies if the interpolation 
+                                            operations are stored as low-rank. If .mat = 'HSS', E 
+                                            is HSS1D and interpolation operators are assumed to be 
+                                            low-rank.
+            
+        OUTPUT:
+            E   <kxk or HSS1D>   Schur Complement matrix used to represent A^-1.
+                            
+                            EInv = R*FInv*L = [I T] * FI * [I ; T.']
+                            E = inv(EInv)
+
+
+
+===================================================================================================
+===================================================================================================
+APPLY
+
+
+    HSS2D_apply_fsym
+
+        FUNCTION CALL:
+            Y = HSS2D_apply_fsym(INFO_TREE,A_HSS,X,params)
+            
+        DESCRIPTION:
+
+            This function performs HSS2D matrix-vector multiply AX=Y, where A is symmetric (fsym) 
+            and X is a subset of sample points {xi}. The HSS2D form of A is encoded in 
+            INFO_TREE, containing the binary tree, index sets, and interpolation operators and 
+            A_HSS, containing the self/sibling interaction matrices. We note that INFO_TREE stores 
+            L and R and A_HSS stores D in the telescoping factorization. 
+
+            HSS matrix-vector multiplication is outlined in section 2.3 of the paper, and it 
+            follows directly from the recursive version of the telescoping factorization. The 
+            product is computed by keeping track of two sets of vectors, x^l and u^l (in the 
+            paper, phi is used in place of x). The vectors x^l represent the charges assigned to 
+            the skeleton points at each level in the tree, and they are computed in an upward pass
+
+                        x^d = X
+                        x^l = R^{l+1} x^{l+1}.
+
+            The vectors u^l are the resulting potentials, computed in a downward pass
+
+                        u^0 = 0
+                        u^l = D^l x^l + L^l u^{l-1}
+                        u^d = Y.
+
+            O(N) complexity is achieved in HSS2D because the D matrices are HSS1D and L,R matrices 
+            are lowrank.
+
+        INPUT:
+            INFO_TREE   <struct>    (output of HSS2D_build_tree_fsym) Binary tree information and 
+                                        matrix skeletons / interpolation matrices.
+            A_HSS       <struct>    (output of HSS2D_compress_fsym) Self and sibling 
+                                        interaction matrices that make up D in the TF.
+            X           <Nx1 float> Column vector of charges on sample points.
+            params      <struct>    (output of HSS_tree_parameters) Kernel parameters.
+               
+                  
+        OUTPUT:
+            Y   <Nx1 float>         Result of the HSS2D matrix apply Y = AX.
+
+
+    HSS2D_apply_TI
+
+        FUNCTION CALL:
+            Y = HSS2D_apply_TI(INFO_TREE,A_HSS,X,params)
+        
+        DESCRIPTION:
+            For translation invariant kernels (TI), this function performs HSS2D matrix-vector 
+            multiply AX=Y, where X is a subset of sample points {xi}. The HSS2D form of A is 
+            encoded in INFO_TREE, containing the binary tree, index sets, and interpolation 
+            operators and A_HSS, containing the self/sibling interaction matrices. We note that 
+            INFO_TREE stores L and R and A_HSS stores D in the telescoping factorization. 
+
+            HSS matrix-vector multiplication is outlined in section 2.3 of the paper, and it 
+            follows directly from the recursive version of the telescoping factorization. The 
+            product is computed by keeping track of two sets of vectors, x^l and u^l (in the 
+            paper, phi is used in place of x). The vectors x^l represent the charges assigned to 
+            the skeleton points at each level in the tree, and they are computed in an upward pass
+
+                        x^d = X
+                        x^l = R^{l+1} x^{l+1}.
+
+            The vectors u^l are the resulting potentials, computed in a downward pass
+
+                        u^0 = 0
+                        u^l = D^l x^l + L^l u^{l-1}
+                        u^d = Y.
+
+            O(N) complexity is achieved in HSS2D because the D matrices are HSS1D and L,R matrices 
+            are lowrank. Additional vectorization speedup results from the translation invariance, 
+            where the same set of matrices is applied for every box in a given level.
+
+        INPUT:
+            INFO_TREE   <struct>    (output of HSS2D_build_tree_fsym) Binary tree information and 
+                                        matrix skeletons / interpolation matrices.
+            A_HSS       <struct>    (output of HSS2D_compress_fsym) Self and sibling 
+                                        interaction matrices that make up D in the TF.
+            X           <Nx1 float> Column vector of charges on sample points.
+            params      <struct>    (output of HSS_tree_parameters) Kernel parameters.
+               
+                  
+        OUTPUT:
+            Y   <Nx1 float>         Result of the HSS2D matrix apply Y = AX.
+
+
+    HSS2D_apply_nsym
+
+        FUNCTION CALL:
+            Y = HSS2D_apply_nsym(INFO_TREE,A_HSS,X,params)
+            
+        DESCRIPTION:
+            This function performs HSS2D matrix-vector multiply AX=Y, where A is not assumed to be 
+            symmetric (nsym) and X is a subset of sample points {xi}. The HSS2D form of A is 
+            encoded in INFO_TREE, containing the binary tree, index sets, and interpolation 
+            operators and A_HSS, containing the self/sibling interaction matrices. We note that 
+            INFO_TREE stores L and R and A_HSS stores D in the telescoping factorization. 
+
+            HSS matrix-vector multiplication is outlined in section 2.3 of the paper, and it 
+            follows directly from the recursive version of the telescoping factorization. The 
+            product is computed by keeping track of two sets of vectors, x^l and u^l (in the 
+            paper, phi is used in place of x). The vectors x^l represent the charges assigned to 
+            the skeleton points at each level in the tree, and they are computed in an upward pass
+
+                        x^d = X
+                        x^l = R^{l+1} x^{l+1}.
+
+            The vectors u^l are the resulting potentials, computed in a downward pass
+
+                        u^0 = 0
+                        u^l = D^l x^l + L^l u^{l-1}
+                        u^d = Y.
+
+            O(N) complexity is achieved in HSS2D because the D matrices are HSS1D and L,R matrices 
+            are lowrank.
+
+        INPUT:
+            INFO_TREE   <struct>    (output of HSS2D_build_tree_nsym) Binary tree information and 
+                                        matrix skeletons / interpolation matrices.
+            A_HSS       <struct>    (output of HSS2D_compress_nsym) Self and sibling 
+                                        interaction matrices that make up D in the TF.
+            X           <Nx1 float> Column vector of charges on sample points.
+            params      <struct>    (output of HSS_tree_parameters) Kernel parameters.
+               
+                  
+        OUTPUT:
+            Y   <Nx1 float>         Result of the HSS2D matrix apply Y = AX.
+
+
+
+===================================================================================================
+===================================================================================================
+APPLY INVERSE
+
+
+    HSS2D_applyinv_fsym 
+
+        FUNCTION CALL:
+            Y = HSS2D_applyinv_fsym(INFO_TREE,A_HSS,X,params)
+        
+        DESCRIPTION:
+            This function performs HSS2D inverse matrix-vector multiply Y = A^{-1}X, where A is 
+            symmetric (fsym) and X is a subset of sample points. The HSS2D form of A is encoded in 
+            INFO_TREE, containing the binary tree, index sets, and interpolation operators and 
+            A_HSS, containing the Schur complement matrices E and F^-1 of each box. We note that 
+            INFO_TREE stores the telescoping factorization L,R of A and A_HSS stores L~,D~,R~ of 
+            A^-1.
+
+            This is an implementation of Algorithm 6 in the paper. It follows the general HSS 
+            matvec algorithm (section 2.3), using L~,D~,R~ of the telescoping factorization of 
+            A^-1. The only difference is that L~,D~,R~ must first be computed from E,F^-1,L,R at 
+            each box,
+
+                    R~ = ERF^1
+                    D~ = F^-1(I - LR~)
+                    L~ = F^-1LE,
+
+             where these operations respect that E,L,R are lowrank and F^-1 is partitioned into 
+             2x2 compressed blocks.
+
+
+        INPUT:
+            INFO_TREE   <struct>    (output of HSS2D_build_tree_fsym) HSS binary tree and matrix 
+                                        skeletons / interpolation matrices of A.
+            A_HSS       <struct>    (output of HSS2D_invert_fsym) Schur complement 
+                                        matrices E,F^-1 used to compute the L~,D~,R~ components of 
+                                        the telescoping factorization of A^-1.
+            X           <Nx2>       Column vector of charges on sample points.
+            params      <struct>    (output of HSS_tree_parameters) Kernel parameters.
+                 
+                  
+        OUTPUT: 
+            Y           <Nx1>       Result of the HSS2D inverse-matrix apply Y = A^{-1}X.     
+
+
+    HSS2D_applyinv_TI
+
+        FUNCTION CALL:
+            Y = HSS2D_applyinv_TI(INFO_TREE,A_HSS,X,params)
+            
+        DESCRIPTION:
+            For transation-invariant kernels (TI), this function performs HSS2D inverse matrix-
+            vector multiply Y = A^{-1}X, where X is a subset of sample points. The HSS2D form of A 
+            is encoded in INFO_TREE, containing the binary tree, index sets, and interpolation 
+            operators and A_HSS, containing the Schur complement matrices E and F^-1 of each box. 
+            We note that INFO_TREE stores the telescoping factorization components L,R of A and 
+            A_HSS stores L~,D~,R~ of A^-1.
+
+            This is an implementation of Algorithm 6 in the paper. It follows the general HSS 
+            matvec algorithm (section 2.3), using L~,D~,R~ of the telescoping factorization of 
+            A^-1. The only difference is that L~,D~,R~ must first be computed from E,F^-1,L,R at 
+            each box,
+
+                    R~ = ERF^1
+                    D~ = F^-1(I - LR~)
+                    L~ = F^-1LE,
+
+             where these operations respect that E,L,R are lowrank and F^-1 is partitioned into 
+             2x2 compressed blocks. Additional vectorization speedup results from the translation 
+             invariance, where the same set of matrices is applied for every box in a given level.
+
+
+        INPUT:
+            INFO_TREE   <struct>    (output of HSS2D_build_tree_fsym) HSS binary tree and matrix 
+                                        skeletons / interpolation matrices of A.
+            A_HSS       <struct>    (output of HSS2D_invert_fsym) Schur complement 
+                                        matrices E,F^-1 used to compute the L~,D~,R~ components of 
+                                        the telescoping factorization of A^-1.
+            X           <Nx2>       Column vector of charges on sample points.
+            params      <struct>    (output of HSS_tree_parameters) Kernel parameters.
+                 
+                  
+        OUTPUT: 
+            Y           <Nx1>       Result of the HSS2D inverse-matrix apply Y = A^{-1}X.  
+
+
+    HSS2D_applyinv_nsym
+
+        FUNCTION CALL:
+            Y = HSS2D_applyinv_nsym(INFO_TREE,A_HSS,X,params)
+            
+        DESCRIPTION:
+            Without making any assumptions on the symmetry of the underlying kernel, this function 
+            performs HSS2D inverse matrix-vector multiply Y = A^{-1}X, where X is a subset of 
+            sample points. The HSS2D form of A is encoded in INFO_TREE, containing the binary 
+            tree, index sets, and interpolation operators and A_HSS, containing the Schur 
+            complement matrices E and F^-1 of each box. We note that INFO_TREE stores the 
+            telescoping factorization components L,R of A and A_HSS stores L~,D~,R~ of A^-1.
+
+            This is an implementation of Algorithm 6 in the paper. It follows the general HSS 
+            matvec algorithm (section 2.3), using L~,D~,R~ of the telescoping factorization of 
+            A^-1. The only difference is that L~,D~,R~ must first be computed from E,F^-1,L,R at 
+            each box,
+
+                    R~ = ERF^1
+                    D~ = F^-1(I - LR~)
+                    L~ = F^-1LE,
+
+             where these operations respect that E,L,R are lowrank and F^-1 is partitioned into 
+             2x2 compressed blocks.
+
+         INPUT:
+            INFO_TREE   <struct>    (output of HSS2D_build_tree_nsym) HSS binary tree and matrix 
+                                        skeletons / interpolation matrices of A.
+            A_HSS       <struct>    (output of HSS2D_invert_nsym) Schur complement 
+                                        matrices E,F^-1 used to compute the L~,D~,R~ components of 
+                                        the telescoping factorization of A^-1.
+            X           <Nx2>       Column vector of charges on sample points.
+            params      <struct>    (output of HSS_tree_parameters) Kernel parameters.
+                 
+                  
+        OUTPUT: 
+            Y           <Nx1>       Result of the HSS2D inverse-matrix apply Y = A^{-1}X.
+
+
+    HSS2D_applyFinv_fsym
+
+        FUNCTION CALL:
+            Y = HSS2D_applyFinv_fsym(FI,V,k,opts)
+            
+        DESCRIPTION:
+            This function applies F^-1 to a vector, where F is the 2x2 compressed block matrix as 
+            defined in the paper. The Schur block inversion formulae for the 4 blocks of F^-1 are 
+            applied to V(FI.J), and then we invert the permutation to get Y. This function assumes 
+            the underlying kernel matrix is full-symmetric (fsym).
+            
+            
+        INPUT:
+            FI      <struct>    (output of HSS2D_build_Finv_fsym.m) contains blocks needed to 
+                                    apply Finv. FI.J holds the indices of skeleton followed by 
+                                    residual points.
+            V       <nx1 float> Column vector defined on I_src.
+            k       <int>       Size of skeleton I_sk.
+            opts    <string>    {'dense', 'block', 'HSS'} Specifies how E,F^-1 are stored. It is 
+                                    determined by the level in the tree, params.lev_HSS, and 
+                                    params.Fopts in the parent function HSS2D_applyinv_fsym.
+                    - 'dense'   E,F^-1 are each computed as a single dense matrix.
+                    - 'block'   The blocks of FI.* are computed densely. This corresponds to the 
+                                    left side of Algorithm 4.
+                    - 'HSS'     The blocks of F^-1 are HSS1D or low-rank. E matrices are HSS1D. 
+                                    This corresponds to the right side of Algorithm 4.
+            
+        
+        OUTPUT:
+            Y       <nx1 float>     = FI*V  defined on I_src
+
+
+    HSS2D_applyFinv_nsym
+
+        FUNCTION CALL:
+            Y = HSS2D_applyFinv_nsym(FI,V,k,opts)
+            
+        DESCRIPTION:
+            This function applies F^-1 to a vector, where F is the 2x2 compressed block matrix as 
+            defined in the paper. The Schur block inversion formulae for the 4 blocks of F^-1 are 
+            applied to V(FI.J), and then we invert the permutation to get Y. This function makes 
+            no assumptions on the symmetry of the underlying kernel (nsym).
+            
+        INPUT:
+            FI      <struct>    (output of HSS2D_build_Finv_nsym.m) contains blocks needed to 
+                                    apply Finv. FI.J holds the indices of skeleton followed by 
+                                    residual points.
+            V       <nx1 float> Column vector defined on I_src.
+            k       <int>       Size of skeleton I_sk.
+            opts    <string>    {'dense', 'block', 'HSS'} Specifies how E,F^-1 are stored. It is 
+                                    determined by the level in the tree, params.lev_HSS, and 
+                                    params.Fopts in the parent function HSS2D_applyinv_nsym.
+                    - 'dense'   E,F^-1 are computed as a single dense matrix.
+                    - 'block'   The blocks of FI.* are computed densely. This corresponds to the 
+                                    left side of Algorithm 4.
+                    - 'HSS'     The blocks of F^-1 are HSS1D or low-rank. E matrices are HSS1D. 
+                                    This corresponds to the right side of Algorithm 4.
+            
+        OUTPUT:
+            Y       <nx1 float>     = FI*V  defined on I_src
+
+
+
+===================================================================================================
+===================================================================================================
+PLOT
+
+
+    show_box
+
+        FUNCTION CALL:
+            show_box(cB,lev,color)
+            
+        DESCRIPTION:
+            This function allows us to plot a box with center cB at levels lev = [lev_x lev_y] 
+            (where level zero corresponds to radius 1).  
+
+
+    show_skeletons
+
+        FUNCTION CALL:
+            show_skeletons(INFO_TREE,params,lev)
+            
+        DESCRIPTION:
+            For a given tree level, this function plots leaf boundaries in red, skeleton points 
+            (I_skup) in black, and residual points (I_rsup) in blue (along the interface).
+
+        INPUT:
+            INFO_TREE   <struct>    (output of HSS2D_build_tree_fsym) HSS binary tree.
+            params      <struct>    Kernel parameters (in particular params.X_source is needed).
+            level       <int>       Level in the tree.  
+
+
+    show_tree
+
+        FUNCTION CALL:
+            show_tree(info_tree)
+            
+        DESCRIPTION:
+            This function plots the leaves of an adaptive binary 'quadtree' generated by 
+            HSS2D_bintree.m
+
+        INPUT: 
+            info_tree   <struct>    (output of HSS2D_bintree_*) HSS binary tree. The interpolation 
+                                        operators and skeleton sets are not needed (params.
+                                        DOskeletons=false as input to HSS2D_bintree_*) In 
+                                        particular, the following tree info is needed 
+                .levbox (int total_box x 1 array)   box level 
+                .leaves (int numleaf x 2 array) leaves box numbers and level
+                .BOX (per box information): 
+                    cent  (float total_box x 2 array) box center 
+                    parent (int total_box x 1 array) box parents (0 for root node)
+                    child (int total_par x 2 array) box's children (non leaf boxes)         
+
+
+
+
+===================================================================================================

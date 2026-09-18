@@ -1,0 +1,203 @@
+function [FI] = HSS2D_Build_FInv(E1, E2, cB, X, I1_skup, I1_skdn, I2_skup, I2_skdn, params, opts)
+%{
+This program returns the four matrices needed to apply the inverse of F 
+using the Schur Complement formulae corresponding to dividing the box
+indices into skeleton and residual points. 
+
+To do this, we follow the definition of F in terms of the E matrices of
+children c1 and c2: 
+
+F = [E1 K12 ; K21 E2] 
+
+Where K12 and K21 are Kernel evaluations. 
+
+Inputs:
+    Matrices E1 and E2 corresponding to indices I1 and I2. 
+
+    Index and ID / Skeleton information for children C1 and C2:
+        I1,I2     (int, nskel x 1 array ) index numbers for points on box
+        k1,k2 (int) size of skeleton
+        J1,J2  (int, nskel x 1 array ) = [I_sk , I_rs] index with upwards
+              
+Outputs
+FI (struct) containing: 
+      - Blocks needed to apply Finv:
+      For leaf boxes, Finv is stored as is: 
+      FI(Nbox)
+      
+      For Non-leaf Boxes: 
+      FI.rs_Inv(Nbox) = F[I_rs(Nbox),I_rs(Nbox)]^(-1) Inverse of diagonal sub-block
+      of F_i corresponding to the interface between two children of B_Nbox
+      FI.rs2sk(Nbox) = F[I_rs(Nbox),I_sk(Nbox)]
+      FI.sk2rs(Nbox) = F[I_sk(Nbox),I_rs(Nbox)]
+      FI.SrsInv(Nbox) = Inverse of Schur Complement Matrix for F
+
+Programmer: Eduardo Corona, CIMS, NYU 
+Advisor: Denis Zorin
+Collaboration with Per Gunnar Martinsson
+%}
+
+% If opts == 'dense', then FI is built as a single, dense matrix as in the
+% 1D code
+
+if strcmp(opts,'dense')
+    
+    X1up = X(I1_skup,:); X2up = X(I2_skup,:);
+    X1dn = X(I1_skdn,:); X2dn = X(I2_skdn,:);
+    
+    K12 = Kernel_Eval(X1dn,X2up,params); 
+    K21 = Kernel_Eval(X2dn,X1up,params); 
+    
+    F = [E1 K12 ; K21 E2]; 
+    FI = inv(F); 
+    
+elseif strcmp(opts,'HSS')
+    
+    X1up = X(I1_skup,:); X2up = X(I2_skup,:);
+    X1dn = X(I1_skdn,:); X2dn = X(I2_skdn,:);
+
+    % If opts == 'HSS', then FI is built using the Schur complement
+    % formulae. It is assumed that E1 and E2 are HSS matrices. 
+    % The diagonal blocks of F are computed as E_dg + K_offd using HSS1DSUM. 
+    
+    lev = params.lev; h = params.h; lay = params.layers; acc = params.acc; 
+    type1 = params.type1; type2 = params.type2; 
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%    
+    % (I) Computing F_sk and F_rs in HSS form: 
+    
+    % (0) SORT: we sort points and separate skeleton and residual sets.
+    [X1up_s,Jup1,Bup1,~] = I_sk_sort(X1up,cB1,lev,h,lay,type1);
+    [X2up_s,Jup2,Bup2,~] = I_sk_sort(X2up,cB2,lev,h,lay,type2);
+    [X1dn_s,Jdn1,Bdn1,~] = I_sk_sort(X1dn,cB1,lev,h,lay,type1);
+    [X2dn_s,Jdn2,Bdn2,~] = I_sk_sort(X2dn,cB2,lev,h,lay,type2);
+    
+    % (1) SPLIT: we split the E HSS matrices into skeleton and residual sets
+    [E1_sk,E1_rs] = HSS1D_split(E1,Bup1,Bdn1,acc); 
+    [E2_sk,E2_rs] = HSS1D_split(E2,Bup2,Bdn1,acc); 
+    
+    % Consolidate points
+    Xsk_up  = [X1up_s(Bup1,:) ; X2up_s(Bup2,:)]; 
+    Xsk_dn  = [X1dn_s(Bup1,:) ; X2dn_s(Bup2,:)]; 
+    Xrs_up  = [X1up_s(~Bup1,:) ; X2up_s(~Bup2,:)]; 
+    Xsk_dn  = [X1dn_s(~Bup1,:) ; X2dn_s(~Bup2,:)]; 
+    
+    % (2) MERGE
+    E_sk  = HSS1D_merge(E1_sk,E2_sk,Xsk_up,Xsk_dn,cB,lev,h,lay,'south');
+    E_rs  = HSS1D_merge(E1_rs,E2_rs,Xrs_up,Xrs_dn,cB,lev,h,lay,'south');
+    
+    % (3) OFFD and SUM
+    Ksk_off  = HSS1D_compress_offd_given_tree(Xsk_up,Xsk_dn,E_sk,1e-12,'lap',params,1); 
+    Krs_off  = HSS1D_compress_offd_given_tree(Xrs_up,Xrs_dn,E_rs,1e-12,'lap',params,1); 
+    
+    F_sk  = HSS1D_SUM(E_sk,Ksk_off,acc); 
+    F_rs  = HSS1D_SUM(E_rs,Krs_off,acc); 
+    
+    % Invert F_rs using HSS1D inversion
+    [FI.rs_Inv.EFG,FI.rs_Inv.ATinv] = OMNI_invert_HSS_nsym(F_rs,acc);
+    FI.rs_Inv.TREE = F_rs(1:9,:); 
+    
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+    % (II) Off-diagonal blocks of F as low rank using id_decomp_rand
+    
+    ID_params.form = 'BHSS'; 
+    p = 5; dist = 'norm'; 
+    T_r2s = ID_RAND_LOWRANK(m1,n1,F_r2s,dist,p,ID_params);
+    T_s2r = ID_RAND_LOWRANK(m2,n2,F_s2r,dist,p,ID_params);
+    
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+    % (III) Schur Complement Matrix S_rs
+    
+    U2 = zeros(m2,size(T_s2r.U,2)); 
+    for i=1:size(T_s2r.U,2)
+       U2(:,i) = OMNI_applyinv_HSS_nsym(FI.rs_Inv.TREE,FI.rs_Inv.EFG,FI.rs_Inv.ATinv,T_s2r.U(:,i),1); 
+    end
+    
+    U = T_r2s.V'*U2; 
+    U = T_r2s.U*U; 
+    
+    V = T_s2r.V; 
+    
+    M = LowRank_HSS1D_given_tree(U,V,F_sk,acc); 
+    S_rs = HSS1D_SUM(M,F_sk,acc); 
+    
+    [S_EFG,S_ATinv] = OMNI_invert_HSS_nsym(S_rs,acc);
+    
+    
+    %{
+    N_up = length(I_srcup); 
+    N_dn = length(I_srcdn);
+    k2_up = N_up - k1_up; 
+    k2_dn = N_dn - k1_dn;
+    
+    ctag_up = [ones(1,k1_up) 2*ones(1,k2_up) ]; 
+    ctag_up = ctag_up(J_up);
+    
+    ctag_dn = [ones(1,k1_dn) 2*ones(1,k2_dn) ];
+    ctag_dn = ctag_dn(J_dn); 
+    
+    % Now we create sets of indices for c1 and c2, puting skeleton points
+    % first. 
+    J1_up = J_up(ctag_up == 1); sk1_up = length(J_up(ctag_up ==1 & (1:N_up)<=k_up)); 
+    J2_up = J_up(ctag_up == 2) - k1; sk2_up = length(J_up(ctag_up ==2 & (1:N_up)<=k_up));
+    
+    J1_dn = J_dn(ctag_dn == 1); sk1_dn = length(J_dn(ctag_dn ==1 & (1:N_dn)<=k_dn)); 
+    J2_dn = J_dn(ctag_dn == 2) - k1; sk2_dn = length(J_dn(ctag_dn ==2 & (1:N_dn)<=k_dn));
+    
+    
+    %--------------------------------------------------------------------------
+    % (I) Create block diagonal matrices for skeleton and residual points 
+
+    %n1 = length(J1); n2 = length(J2);
+    % To be replaced by HSS concatenation
+    E_skdg = [ E1(J1_dn(1:sk1_dn),J1_up(1:sk1_up)) zeros(sk1_dn,sk2_up) ; zeros(sk2_dn,sk1_up) E2(J2_dn(1:sk2_dn),J2_up(1:sk2_up)) ];  
+    E_rsdg = [ E1(J1_dn(sk1_dn+1:end),J1_up(sk1_up+1:end)) zeros(k1_dn - sk1_dn,k2_up - sk2_up) ; zeros(k2_dn - sk2_dn,k1_up - sk1_up) E2(J2_dn(sk2_dn+1:end),J2_up(sk2_up+1:end)) ]; 
+
+
+    % Replace by HSS compression
+    K_sk = Kernel_Eval(X(I_srcdn(J_dn(1:k_dn)),:),X(I_srcup(J_up(1:k_up)),:),params);
+    K_rs = Kernel_Eval(X(I_srcdn(J_dn(k_dn+1:end)),:),X(I_srcup(J_up(k_up+1:end)),:),params); 
+
+    % Kernel diagonal matrices
+   
+    K_skdg1 = Kernel_Eval(X(I_srcdn(J1_dn(1:sk1_dn)),:),X(I_srcup(J1_up(1:sk1_up)),:),params); 
+    K_skdg2 = Kernel_Eval(X(I_srcdn(J2_dn(1:sk2_dn)+k1_dn),:),X(I_srcup(J2_up(1:sk2_up)+k1_up),:),params);
+    
+    K_rsdg1 = Kernel_Eval(X(I_srcdn(J1_dn(sk1_dn+1:end)),:),X(I_srcup(J1_up(sk1_up+1:end)),:),params);  
+    K_rsdg2 = Kernel_Eval(X(I_srcdn(J2_dn(sk2_dn+1:end)+k1_dn),:),X(I_srcup(J2_up(sk2_up+1:end)+k1_up),:),params);
+
+    K_skdg = [K_skdg1 zeros(sk1_dn,sk2_up) ; zeros(sk2_dn,sk1_up) K_skdg2 ]; 
+    K_rsdg = [K_rsdg1 zeros(k1_dn - sk1_dn,k2_up - sk2_up) ; zeros(k2_dn - sk2_dn,k1_up - sk1_up) K_rsdg2 ];
+
+    % Define the diagonal blocks of F: 
+    % Replace with SUMHSS
+    F_sk = E_skdg + K_sk - K_skdg; 
+    F_rs = E_rsdg + K_rs - K_rsdg; 
+
+    % Here we would invert F_rs using 1D HSS inversion
+    FI.rs_Inv = inv(F_rs); 
+
+    %--------------------------------------------------------------------------
+    % (II) Off diagonal blocks F_rs2sk and F_sk2rs
+
+    %Replace by Low Rank Decomposition using Rand ID
+    
+    FI.rs2sk = [ E1(J1_dn(1:sk1_dn),J1_up(sk1_up+1:end)) Kernel_Eval(X(I_srcdn(J1_dn(1:sk1_dn)),:),X(I_srcup(J2_up(sk2_up+1:end)+k1_up),:),params), ; ...
+                 Kernel_Eval(X(I_srcdn(J2_dn(1:sk2_dn)+k1_dn),:),X(I_srcup(J1_up(sk1_up+1:end)),:),params) E2(J2_dn(1:sk2_dn),J2_up(sk2_up+1:end)) ];
+
+    %Replace by Low Rank Decomposition using Rand ID
+    FI.sk2rs = [ E1(J1_dn(sk1_dn+1:end),J1_up(1:sk1_up)) Kernel_Eval(X(I_srcdn(J1_dn(sk1_dn+1:end)),:),X(I_srcup(J2_up(1:sk2_up)+k1_up),:)), ; ...
+                 Kernel_Eval(X(I_srcdn(J2_dn(sk2_dn+1:end)+k1_dn),:),X(I_srcup(J1_up(1:sk1_up)),:)) E2(J2_dn(sk2_dn+1:end),J2_up(1:sk2_up)) ];
+
+    %--------------------------------------------------------------------------
+    % (III) Schur Complement matrix (replace by low rank perturbation of HSS)
+    S_rs = F_sk - FI.rs2sk*FI.rs_Inv*FI.sk2rs; 
+    % Inverse
+    FI.SrsInv = inv(S_rs); 
+
+    %--------------------------------------------------------------------------
+    
+    %}
+end
+
+end

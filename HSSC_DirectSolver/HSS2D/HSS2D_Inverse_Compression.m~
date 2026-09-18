@@ -1,0 +1,121 @@
+function [A_HSS] = HSS2D_Inverse_Compression(INFO_TREE,params)
+%{
+This program returns a struct A_HSS which contains an HSS compression 
+of the matrix A[I,I], where I is a set of source points on the plane
+(WLOG we'll asume them to be on [-1,1]^2 ). The input INFO_TREE should
+already contained the precomputed binary tree information and matrix
+skeletons required to compress the inverse directly. 
+
+Since this is the slow 2D solver, the corresponding matrices coming from
+Schur complement inversion are stored densely. (The O(N) solver would
+replace this with the corresponding 1DHSS or Low rank versions) 
+
+Inputs:
+INFO_TREE (struct) containing: 
+
+Binary Tree: 
+    numlev (int depth x 1 array) boxes per level
+    leaves (int numleaf x 2 array) leaves box numbers and level
+
+    BOX (per box info) 
+        cent  (float total_box x 2 array) box center 
+        levbox (int total_box x 1 array)   box level 
+        parent (int total_box x 1 array) box parents (0 for root node)
+        child (int total_par x 2 array) box's children (non leaf boxes)
+
+        Index and ID / Skeleton information:
+            I_srcup / I_srcdn (int, nskel x 1 array ) index numbers for 
+            points on box before skeletonization
+            I_skup / I_skdn   (int, k_skel x 1 array) index numbers for 
+            points on box after skeletonization (so, minus interface)
+            n_skel (int) size of I_srcup / I_srcdn
+            k_skel (int) size of skeleton
+            J_up / J_dn  (int, nskel x 1 array ) = [I_sk , I_rs] index with upwards
+            skeleton first, residual points second. 
+            T_up / T_dn  Interpolation matrix (stored either densely or as a low
+            rank (T.U,T.V) pair)
+
+params - (struct) Parameters: 
+              
+Outputs
+A_HSS (struct) containing: 
+      - Interpolation Matrices R_Nbox and L_Nbox, encoded by the skeleton info in
+      INFO_TREE. 
+
+      Components of D,R,L representation of inverse A
+      - Blocks needed to apply Finv:
+      For leaf boxes, FI ("F Inverse") is stored as is: 
+      A_HSS.FI(Nbox)
+      
+      For Non-leaf Boxes: 
+      A_HSS.FI.rs_Inv(Nbox) = F[I_rs(Nbox),I_rs(Nbox)]^(-1) Inverse of diagonal sub-block
+      of F_i corresponding to the interface between two children of B_Nbox
+      A_HSS.FI.rs2sk(Nbox) = F[I_rs(Nbox),I_sk(Nbox)]
+      A_HSS.FI.sk2rs(Nbox) = F[I_sk(Nbox),I_rs(Nbox)]
+      A_HSS.FI.SrsInv(Nbox) = Inverse of Schur Complement Matrix for F
+
+      - E matrix
+      A_HSS.E(Nbox) - Schur Complement Matrix 
+
+Programmer: Eduardo Corona, CIMS, NYU 
+Advisor: Denis Zorin
+Collaboration with Per Gunnar Martinsson
+%}
+
+Fopts_init = 'blocks'; 
+Eopts.mat = Fopts_init; 
+Eopts.LR = 1; 
+
+% Upward Pass
+for lev = INFO_TREE.depth:-1:1
+    for i = 1:INFO_TREE.numlev(lev+1)
+        Nbox = INFO_TREE.box_numbers(lev+1,i);
+        
+        %------------------------------------------------------------------
+        % Routine to get blocks of FInv from E
+        % Index arrays for box Nbox
+        I_srcup = INFO_TREE.BOX(Nbox).I_srcup;
+        I_srcdn = INFO_TREE.BOX(Nbox).I_srcdn;
+        k = INFO_TREE.BOX(Nbox).k_skel; 
+        J_up = INFO_TREE.BOX(Nbox).J_up; 
+        T_up = INFO_TREE.BOX(Nbox).T_up;  
+        J_dn = INFO_TREE.BOX(Nbox).J_dn; 
+        T_dn = INFO_TREE.BOX(Nbox).T_dn; 
+        % If the box is a leaf
+        if INFO_TREE.BOX(Nbox).child(1) == 0
+            X = params.X_source; 
+            A_HSS(Nbox).FI = inv(Kernel_Eval(X(I_srcdn,:),X(I_srcup,:))); 
+        else
+            %Children box numbers
+            C1 = INFO_TREE.BOX(Nbox).child(1); C2 = INFO_TREE.BOX(Nbox).child(2); 
+            % Size of skeletons for c1 and c2
+            k1 = INFO_TREE.BOX(C1).k_skel; k2 = INFO_TREE.BOX(C2).k_skel; 
+            % Build FInv:  HSS2D_Build_FInv(E1, E2, X, I_srcup, J_up, I_srcdn, J_dn, k, k1, k2, opts)
+            
+            N = k1+k2; 
+            if (k == N)
+                Fopts = 'dense'; 
+            else
+                Fopts = Fopts_init; 
+            end
+            
+            [FI] = HSS2D_Build_FInv( A_HSS(C1).E, A_HSS(C2).E, X, I_srcup, J_up, I_srcdn, J_dn, k, k1, k2, Fopts);  
+            A_HSS(Nbox).FI = FI; 
+            clear FI; 
+        end
+        %------------------------------------------------------------------
+        
+        %Routine to compute E from FInv
+        
+        if (strcmp(Fopts,'blocks') && INFO_TREE.BOX(Nbox).child(1) == 0)
+            Eopts.mat = 'dense'; 
+        else
+            Eopts.mat = Fopts_init; 
+        end
+        
+        A_HSS(Nbox).E = HSS2D_Build_E(A_HSS(Nbox).FI, J_up, T_up, J_dn, T_dn, k, Eopts); 
+        
+        %------------------------------------------------------------------
+        
+    end
+end

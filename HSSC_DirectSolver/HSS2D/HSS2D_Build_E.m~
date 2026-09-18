@@ -1,0 +1,93 @@
+function E = HSS2D_Build_E(FI,J_up,T_up,J_dn,T_dn,k,opts)
+%{
+This program returns the Schur Complement matrix E, defined by 
+
+EInv = R*FInv*L = [I T_up] * FI * [I ; T_dn]
+E = inv(EInv)
+
+Inputs:
+
+FI (struct) containing: 
+      - Blocks needed to apply Finv:
+      For leaf boxes, Finv is stored as is: 
+      FI(Nbox)
+      
+      For Non-leaf Boxes: 
+      FI.rs_Inv(Nbox) = F[I_rs(Nbox),I_rs(Nbox)]^(-1) Inverse of diagonal sub-block
+      of F_i corresponding to the interface between two children of B_Nbox
+      FI.rs2sk(Nbox) = F[I_rs(Nbox),I_sk(Nbox)]
+      FI.sk2rs(Nbox) = F[I_sk(Nbox),I_rs(Nbox)]
+      FI.SrsInv(Nbox) = Inverse of Schur Complement Matrix for F
+
+    Index and ID / Skeleton information:
+        k (int) size of skeleton
+        J_up  (int, nskel x 1 array ) = [I_sk , I_rs] index with upwards
+        skeleton first, residual points second. 
+        T_up  upwarsds interpolation matrix (stored either densely or as a low
+        rank (U,V) pair)
+        (J_dn,T_dn) corresponding downwards ID pair
+              
+Outputs
+      - E matrix (Schur Complement Matrix)
+
+Programmer: Eduardo Corona, CIMS, NYU 
+Advisor: Denis Zorin
+Collaboration with Per Gunnar Martinsson
+%}
+
+if strcmp(opts.mat,'dense')
+    
+    if (opts.LR == 0)
+        L(J_dn,:) = [eye(k) ; T_dn']; 
+        R(:,J_up) = [ eye(k) T_up]; 
+        EI = R*FI*L;
+        
+        % Direct inversion
+        E = inv(EI); 
+    else
+        Phi = FI(J_up,J_dn);
+        U_cell = cell(3,1); V_cell = cell(3,1); 
+        V_cell{1} = Phi(k+1:end,1:k)'*T_up.V;  U_cell{1} = T_up.U;
+        V_cell{2} = T_dn.U;                    U_cell{2} = Phi(1:k,k+1:end)*(T_dn.V); 
+        V_cell{3} = T_dn.U;                    U_cell{3} = T_up.U*(T_up.V')*Phi(k+1:end,k+1:end)*T_dn.V; 
+        [U,V] = LowRank_Recomp(U_cell,V_cell,1e-12); 
+        
+        % Inversion using SMW
+        S = Phi(1:k,1:k)\eye(k); 
+        m = size(U,2); 
+        MI = (eye(m) + V'*(Phi(1:k,1:k)\U)); 
+        E = S*(eye(k) - U*(MI\V')*S); 
+    end
+    
+else
+
+    % (I) EInv = phi_sk + T_up*phi_rs2sk + phi_sk2rs*T_dn + T_up*phi_rs*R_dn,
+    % where phis are defined by the block inversion formulae. 
+    if (opts.LR==0)
+        phi_rs = FI.rs_Inv*(eye(length(FI.rs_Inv)) + FI.sk2rs*FI.SrsInv*FI.rs2sk*FI.rs_Inv);
+        phi_rs2sk = -FI.SrsInv*FI.rs2sk*FI.rs_Inv; 
+        phi_sk2rs = -FI.rs_Inv*FI.sk2rs*FI.SrsInv; 
+        
+        EI = FI.SrsInv + T_up*phi_sk2rs + phi_rs2sk*T_dn' + T_up*phi_rs*T_dn'; 
+        
+        % (II) Inversion of EInv, direct
+        E = inv(EI); 
+    else
+        %phi_rs = FI.rs_Inv*(eye(length(FI.rs_Inv)) + FI.sk2rs*FI.SrsInv*FI.rs2sk*FI.rs_Inv);
+        %$phi_rs2sk = -FI.SrsInv*FI.rs2sk*FI.rs_Inv; 
+        %phi_sk2rs = -FI.rs_Inv*FI.sk2rs*FI.SrsInv; 
+        
+        U_cell = cell(3,1); V_cell = cell(3,1); 
+        V_cell{1} = -FI.SrsInv*(FI.rs2sk*(FI.rs_Inv*T_up.V)); U_cell{1} = T_up.U;
+        V_cell{2} = T_dn.U;          U_cell{2} = -FI.rs_Inv*(FI.sk2rs*(FI.SrsInv*T_dn.V')); 
+        V_cell{3} = T_up.U;          U_cell{3} = T_up.U*T_up.V'*(FI.rs_Inv*(T_dn.V + FI.sk2rs*FI.SrsInv*FI.rs2sk*FI.rs_Inv*T_dn.V)); 
+        [U,V] = LowRank_Recomp(U_cell,V_cell,1e-12); 
+        
+        % Inversion using SMW
+        S = FI.SrsInv\eye(k); 
+        m = size(U,2); 
+        MI = (eye(m) + V'*(FI.SrsInv\U)); 
+        E = S*(eye(k) - U*(MI\V')*S); 
+    end
+
+end

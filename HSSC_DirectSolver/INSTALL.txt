@@ -1,0 +1,206 @@
+===================================================================================================
+==                                                                                               ==
+==                                        INSTALL                                                ==
+== A. Szymczak                                                                                   ==
+===================================================================================================
+Copyright (C) 2011-2013 E. Corona, P.G. Martinsson, D. Zorin
+
+
+
+
+Download HSSC_Direct_Solver/ to your computer without changing any of the folder or file names. If 
+you have any problems or questions that are not addressed, feel free to contact Eduardo Corona at 
+corona at cims.nyu.edu.
+
+
+
+
+GET_THE_CODE_RUNNING_____________________________________________________________________________
+- In MATLAB, run Run_HSS1D_Tests from the ./HSS1D/Test/ folder and 
+  Run_HSS2D_Tests from the ./HSS2D/Test/ folder.
+
+    ERROR 
+
+        -   The code has only been tested on MATLAB versions 2010a and later. Versions older than 
+            2011a will throw an error due to the new random generator function rng, which will 
+            need to be replaced with rand (commented below each occurence).
+
+    OUTPUT
+
+        The output for Run_HSS2D_Tests should look like the following. The errors displayed should 
+	be on the order of 1e-8 or better.
+
+            ...
+
+            ------------------------------------------------------------------
+            Test HSS1D compress of Low Rank operator 
+            ------------------------------------------------------------------ 
+
+            LR to HSS Error 
+
+            ans =
+
+                6.3928e-16
+
+            ------------------------------------------------------------------ 
+            Total Time:     4.2633
+
+        
+        The output for Run_HSS2D_Tests should look like the following. The errors displayed should 
+	be on the order of 1e-8 or better.
+            ...
+
+            (III) Inverse Apply 
+
+            Non-oscillatory problem, random rhs 
+
+            mean Error of HSS vs Dense Inverse Application: 4.785744e-11 
+
+            mean Error of Dense Inverse Application: 7.284727e-15 
+
+            mean Error of HSS Inverse Application: 3.037052e-11 
+
+            mean Error of HSS Inverse Application (after 1 IR): 7.504579e-16 
+
+            mean O(N^1.5) Apply Time: 3.774698e-02 
+
+            mean O(N) Apply Time: 6.012968e-02 
+
+            Memory required for O(N) Tree build =    2.56 MB     (about 2.051556e+01 reals/DOF) 
+
+            Memory required for O(N^1.5) Inverse =   40.50 MB     (about 3.239924e+02 reals/DOF) 
+
+            Memory required for O(N) Inverse =   23.30 MB     (about 1.863839e+02 reals/DOF) 
+
+
+
+
+
+DUAN-ROKHLIN_WEIGHTS_FOR_HELMHOLTZ_KERNEL__________________________________________________________
+- In MATLAB, run Test_HSS2D_CMZ2012_paper(7,8) from the ./HSS2D/Test/ folder.
+
+    ERROR
+
+        -   There are machine-specific Fortran executables that calculate the Duan-Rokhlin 
+            correction weights for the Helmholtz kernel. These executables are located in the 
+            ./Common/ folder:
+
+                FORTRAN_get_DR_weights_MAC          % Compiled on 64-bit Mac 10.9
+                FORTRAN_get_DR_weights_WINDOWS.exe  % Compiled on 64-bit Windows 7
+                FORTRAN_get_weights_LINUX           % Compiled on 64-bit Linux
+            
+            To test if an executable works, run it from the Common folder. The executable reads 
+            indata.txt and outputs the file outdata.txt, which should look like the following:
+
+                ===========================================================
+                === indata.txt
+                ===========================================================
+
+                h       =   3.125000000000000e-02
+                real_rk =   1.000000000000000e+00
+                imag_rk =   0.000000000000000e+00
+
+                ===========================================================
+                === outdata.txt
+                ===========================================================
+
+                ier   =     0
+                h     =     0.312500000000000D-01
+                rk    =     0.100000000000000D+01    0.000000000000000D+00
+                corr0 =     0.976562500000008D-03   -0.304146129302758D-02
+                corr1 =     0.403896783473158D-22   -0.295047178924842D-07
+                corr2 =    -0.231111593326468D-25    0.170689069471396D-10
+                corr3 =     0.154074395550979D-25   -0.804063983388469D-11
+                corr4 =     0.141059322098675D-28   -0.127339515674902D-13
+                corr5 =    -0.249792549549736D-29    0.178140767706757D-14
+
+        -   If none of the executables work on your machine, you will need to compile the Fortran 
+            code FORTRAN_get_DR_weights.f yourself. You then need to put the compiled executable 
+            in the Common folder and edit the following code block of DR_stencil.m -- comment out 
+            everything above (2) and specify the 'path/executable' of your self-compiled Fortran 
+	    exe on line (2).
+
+                wpath = strsplit(pwd,'HSSC_DirectSolver');                  % (1) DEFAULT PATH/EXE
+                wpath = strcat(char(wpath(1)),'HSSC_DirectSolver/Common/');
+                if strcmp(computer,'MACI64')
+                    wpath = strcat(wpath,'FORTRAN_get_DR_weights_MAC');  
+                elseif strcmp(computer,'PCWIN') || strcmp(computer,'PCWIN64')
+                    wpath = strcat(wpath,'FORTRAN_get_DR_weights_WINDOWS.exe');
+                elseif strcmp(computer,'GLNXA64')
+                    wpath = strcat(wpath,'FORTRAN_get_DR_weights_LINUX');
+                end
+                % wpath = 'path/executable'                                 % (2) SELF-COMPILED EXE
+                system(wpath);                                              % (3) RUN EXECUTABLE
+
+
+            If you are not running the program from a subdirectory of HSSC_DirectSolver/, 
+            you will need to specify the path to the Common folder in line (3) above.
+
+        -   To evaluate the Helmholtz kernel without computing Duan Rokhlin weights, set 
+            params.order = 0 in the following line of HSS_tree_parameters.m.
+
+                params.order = 4;   % quadrature order, set = 0 to forgo DR weights
+
+        -   If you are running the student version of MATLAB on a Mac you might get the following 
+            error 
+
+                dyld: lazy symbol binding failed: Symbol not found: 
+                    __gfortran_transfer_character_write
+
+            This can be fixed by running the MATLAB command 
+
+                setenv('DYLD_LIBRARY_PATH', '/usr/local/bin:/opt/local/lib:').
+
+
+    OUTPUT
+
+        The output for Test_HSS2D_CMZ2012_paper(7,8) should look like the following repeated for 
+	each kernel tested. The errors throughout should be on the order of 1e-6 or better.
+
+            ------------------------------------------------------------------
+            (5.4) Lippmann Schwinger (Helmholtz) scattering problem, NTI, acc=1e-10 
+            ------------------------------------------------------------------ 
+
+            Parameters 
+
+            params = 
+
+                ...
+
+            ...
+
+            (III) Inverse Apply 
+
+            Lippman Schwinger, scattered incoming field 
+
+            mean Error of HSS vs Dense Inverse Application: 0.000000e+00 
+
+            mean Error of Dense Inverse Application: 5.249252e-10 
+
+            mean Error of HSS Inverse Application: 5.249252e-10 
+
+            mean Error of HSS Inverse Application (after 1 IR): 5.280532e-10 
+
+            mean O(N^1.5) Apply Time: 8.742414e-02 
+
+            mean O(N) Apply Time: 7.667210e-02 
+
+            Memory required for O(N) Tree build =    8.20 MB     (about 3.428084e+02 reals/DOF) 
+
+            Memory required for O(N^1.5) Inverse =   82.27 MB     (about 3.438426e+03 reals/DOF) 
+
+            Memory required for O(N) Inverse =   82.27 MB     (about 3.438426e+03 reals/DOF) 
+
+            ...
+
+    
+
+
+
+
+
+
+
+
+
+
